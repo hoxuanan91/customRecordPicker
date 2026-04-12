@@ -1,6 +1,18 @@
 # customRecordPicker
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Salesforce API](https://img.shields.io/badge/Salesforce%20API-66.0%2B-blue)](https://developer.salesforce.com/docs/platform/graphql/guide)
+[![LWC](https://img.shields.io/badge/LWC-Lightning%20Web%20Component-brightgreen)](https://developer.salesforce.com/docs/component-library)
+
 A configurable Lightning Web Component (LWC) that replicates the native `lightning-record-picker` experience, with extended capabilities:
+
+- **Display profiles** — show different subtitle fields depending on a discriminator field (e.g. `IsPersonAccount`)
+- **Flexible filter system** — supports filter criteria, `filterLogic` expressions (`AND`, `OR`, `NOT`, parentheses), and Salesforce date literals (`TODAY`, `LAST_MONTH`, `NEXT_YEAR`, …)
+- **Multi-field search** — search across multiple fields simultaneously (String, Picklist)
+- **Relationship fields** — traverse lookup fields (`Owner.Name`, `RecordType.DeveloperName`)
+- **Flow-compatible** — fires `FlowAttributeChangeEvent` when `useFlow = true`
+- **Keyboard navigation** — ArrowUp / ArrowDown / Enter / Escape
+- **Validation API** — `validate()` / `reportValidity()` compatible with Flow screen validation
 
 ---
 
@@ -56,16 +68,6 @@ The demo below shows the component configured for **Account search with display 
 ```
 
 > **Note on `discriminator`:** The demo uses `RecordType.DeveloperName` (a relationship field) instead of `IsPersonAccount` because the Person Accounts feature is not enabled on the demo org. The behavior is identical — the component reads the discriminator field value from each result node and selects the matching `displayProfiles` key (`"Personal_Account"` or `"B2C"`).
-
----
-
-- **Display profiles** — show different subtitle fields depending on a discriminator field (e.g. `IsPersonAccount`)
-- **Flexible filter system** — supports filter criteria, `filterLogic` expressions (`AND`, `OR`, `NOT`, parentheses), and Salesforce date **literals** (`TODAY`, `LAST_MONTH`, `NEXT_YEAR`, …)
-- **Multi-field search** — search across multiple fields simultaneously (String, Picklist)
-- **Relationship fields** — traverse lookup fields (`Owner.Name`, `RecordType.DeveloperName`)
-- **Flow-compatible** — fires `FlowAttributeChangeEvent` when `useFlow = true`
-- **Keyboard navigation** — ArrowUp / ArrowDown / Enter / Escape
-- **Validation API** — `validate()` / `reportValidity()` compatible with Flow screen validation
 
 ---
 
@@ -168,29 +170,267 @@ The `config` property accepts either a JavaScript object or a JSON string.
 
 ---
 
-## Filter reference
+## Config attributes — detailed reference
 
-Each criterion in `filter.criteria` has this shape:
+### `objectApiName`
+
+| | |
+|---|---|
+| **Type** | `String` |
+| **Required** | Yes |
+| **Default** | — |
+| **Description** | The Salesforce API name of the object to search. Must start with a letter and contain only alphanumeric characters and underscores. Custom objects must end with `__c`. |
+| **Examples** | `"Account"`, `"Contact"`, `"Opportunity"`, `"MyCustomObject__c"` |
+
+---
+
+### `searchFields`
+
+| | |
+|---|---|
+| **Type** | `Array<{ apiName: String, dataType?: String }>` |
+| **Required** | Yes |
+| **Default** | — |
+| **Description** | List of fields used to build the `WHERE` clause. Each entry is an object with at minimum an `apiName`. The component generates an `OR` condition across all search fields, so a result matches if _any_ field matches the search term. |
+
+#### `searchFields[].apiName`
+
+| | |
+|---|---|
+| **Type** | `String` |
+| **Required** | Yes |
+| **Description** | Field API name. Supports simple fields (`Name`, `Phone`) and relationship traversal (`RecordType.DeveloperName`). Custom fields must end with `__c`. |
+
+#### `searchFields[].dataType`
+
+| | |
+|---|---|
+| **Type** | `String` |
+| **Required** | No |
+| **Default** | `"String"` |
+| **Allowed values** | `"String"`, `"Picklist"` |
+| **Description** | Data type of the field. `"String"` generates a `LIKE '%...%'` condition. `"Picklist"` generates an `eq` (exact match) condition. Use `"Picklist"` for fields that are actual Picklist type in Salesforce, or for any field where partial matching is not desired. |
+
+**Example:**
+```json
+"searchFields": [
+  { "apiName": "Name" },
+  { "apiName": "Phone" },
+  { "apiName": "AccountSource", "dataType": "Picklist" }
+]
+```
+
+---
+
+### `label`
+
+| | |
+|---|---|
+| **Type** | `String` |
+| **Required** | No |
+| **Default** | `"Rechercher un enregistrement"` |
+| **Description** | Text label displayed above the search input. |
+| **Example** | `"Search Account"` |
+
+---
+
+### `placeholder`
+
+| | |
+|---|---|
+| **Type** | `String` |
+| **Required** | No |
+| **Default** | `""` (empty) |
+| **Description** | Placeholder text displayed inside the search input when it is empty. |
+| **Example** | `"Type a name or phone number…"` |
+
+---
+
+### `titleField`
+
+| | |
+|---|---|
+| **Type** | `String` |
+| **Required** | No |
+| **Default** | `"Name"` |
+| **Description** | Field API name whose value is displayed as the primary title in each search result row and in the selected-record pill. Supports relationship traversal (e.g. `"Account.Name"`). |
+| **Constraints** | Must be a valid field path (letters, digits, underscores, dots for relationships). |
+| **Examples** | `"Name"`, `"Subject"`, `"CaseNumber"` |
+
+---
+
+### `subtitleFields`
+
+| | |
+|---|---|
+| **Type** | `Array<{ apiName: String, fieldLabel: String }>` |
+| **Required** | No |
+| **Default** | `[]` (no subtitle) |
+| **Description** | Fields displayed as a secondary line below the title in each result row and in the selected-record pill. Each field is rendered as `"fieldLabel : value"`. Multiple fields are joined with ` · `. Supports relationship traversal. |
+| **Note** | Overridden by `displayProfiles[key].subtitleFields` when `discriminator` is set and a matching profile exists. |
+
+#### `subtitleFields[].apiName`
+
+| | |
+|---|---|
+| **Type** | `String` |
+| **Required** | Yes |
+| **Description** | Field API name. Supports relationship traversal: `"Owner.Name"`, `"Owner.Profile.Name"`. Use `"Id"` to display the Salesforce record ID. |
+
+#### `subtitleFields[].fieldLabel`
+
+| | |
+|---|---|
+| **Type** | `String` |
+| **Required** | Yes |
+| **Description** | Human-readable label displayed before the field value: `"fieldLabel : value"`. |
+
+**Example:**
+```json
+"subtitleFields": [
+  { "apiName": "BillingCity",   "fieldLabel": "City"   },
+  { "apiName": "AccountNumber", "fieldLabel": "Ref"    },
+  { "apiName": "Owner.Name",    "fieldLabel": "Owner"  }
+]
+```
+
+---
+
+### `iconName`
+
+| | |
+|---|---|
+| **Type** | `String` |
+| **Required** | No |
+| **Default** | `""` (no icon) |
+| **Description** | SLDS icon name used in search result rows. Follows the `category:name` format of `lightning-icon`. |
+| **Examples** | `"standard:account"`, `"standard:contact"`, `"standard:opportunity"`, `"custom:custom1"` |
+| **Reference** | [SLDS Icon Library](https://www.lightningdesignsystem.com/icons/) |
+
+---
+
+### `required`
+
+| | |
+|---|---|
+| **Type** | `Boolean` |
+| **Required** | No |
+| **Default** | `false` |
+| **Description** | When `true`, `validate()` returns `isValid: false` if no record is selected. Used in Flow screen validation or custom form validation. An asterisk is shown on the label when required. |
+
+---
+
+### `maxResults`
+
+| | |
+|---|---|
+| **Type** | `Integer` |
+| **Required** | No |
+| **Default** | `10` |
+| **Constraints** | Capped at `100` (Salesforce GraphQL limit). Values above 100 are silently clamped to 100. |
+| **Description** | Maximum number of records to display in the dropdown. |
+
+---
+
+### `minimumSearchLength`
+
+| | |
+|---|---|
+| **Type** | `Integer` |
+| **Required** | No |
+| **Default** | `2` |
+| **Constraints** | Must be ≥ 1. |
+| **Description** | Minimum number of characters the user must type before the component fires a search query. Useful to avoid overly broad queries on large objects. |
+
+---
+
+### `filter`
+
+| | |
+|---|---|
+| **Type** | `Object` |
+| **Required** | No |
+| **Default** | `undefined` (no filter) |
+| **Description** | Static filter applied to every search query in addition to the user's search term. The filter is appended to the GraphQL `WHERE` clause. |
+
+#### `filter.criteria`
+
+| | |
+|---|---|
+| **Type** | `Array<Criterion>` |
+| **Required** | Yes (when `filter` is provided) |
+| **Description** | Array of filter conditions. Each criterion is an object with `fieldPath`, `operator`, and `value`. |
+
+**Criterion shape:**
 
 ```jsonc
 {
-  "fieldPath": "LastModifiedDate",   // Field to filter on (supports relationships)
-  "operator": "lt",                  // One of: eq ne like gt gte lt lte in nin
-  "value": <value>                   // See value types below
+  "fieldPath": "Type",         // Field to filter on (supports relationship fields)
+  "operator": "eq",            // One of: eq ne like gt gte lt lte in nin
+  "value": "Customer - Direct" // See value types below
 }
 ```
 
-### Filter value types
+**`fieldPath`** — Field API name. Supports relationship traversal (`Owner.IsActive`, `RecordType.DeveloperName`).
 
-| Type | Example | GraphQL variable type |
+**`operator`** — One of:
+
+| Operator | Meaning | Notes |
 |---|---|---|
-| String | `"Customer"` | `String` |
-| Salesforce ID (15 or 18 chars) | `"001xx000003GHPY"` | `ID` |
-| Integer | `42` | `Int` |
-| Float | `3.14` | `Float` |
-| Boolean | `true` | `Boolean` |
-| Date literal | `{ "literal": "TODAY" }` | `Date` (inlined, no variable) |
-| Null | `null` | `String` |
+| `eq` | Equal to | |
+| `ne` | Not equal to | |
+| `like` | Pattern match | Use `%` and `_` as wildcards |
+| `gt` | Greater than | |
+| `gte` | Greater than or equal | |
+| `lt` | Less than | |
+| `lte` | Less than or equal | |
+| `in` | Value is in array | `value` must be an array |
+| `nin` | Value is not in array | `value` must be an array |
+
+**`value`** — Supported types:
+
+| Type | Example | Notes |
+|---|---|---|
+| `String` | `"Customer"` | |
+| Salesforce ID (15 or 18 chars) | `"001xx000003GHPY"` | Sent as GraphQL `ID` type |
+| `Integer` | `42` | |
+| `Float` | `3.14` | |
+| `Boolean` | `true` | |
+| Date literal | `{ "literal": "TODAY" }` | Inlined in query, not a variable |
+| `null` | `null` | |
+| Array | `["A", "B"]` | Required for `in` / `nin` operators |
+
+#### `filter.filterLogic`
+
+| | |
+|---|---|
+| **Type** | `String` |
+| **Required** | No |
+| **Default** | All criteria combined with `AND` |
+| **Description** | Expression that controls how `filter.criteria` are combined. Uses 1-based criterion index numbers, `AND`, `OR`, `NOT`, and parentheses. |
+
+**Syntax:**
+```
+"1 AND 2"
+"1 OR 2"
+"(1 OR 2) AND 3"
+"NOT 1"
+"(1 AND 2) OR (3 AND NOT 4)"
+```
+
+**Example — filter with logic:**
+```json
+"filter": {
+  "criteria": [
+    { "fieldPath": "CreatedDate", "operator": "gte", "value": { "literal": "LAST_90_DAYS" } },
+    { "fieldPath": "Type",        "operator": "eq",  "value": "Customer - Direct"          },
+    { "fieldPath": "Type",        "operator": "eq",  "value": "Partner"                    }
+  ],
+  "filterLogic": "1 AND (2 OR 3)"
+}
+```
+
+---
 
 ### Supported date literals
 
@@ -198,16 +438,62 @@ Any literal from the [Salesforce GraphQL literal values list](https://developer.
 
 `TODAY` · `YESTERDAY` · `TOMORROW` · `LAST_WEEK` · `THIS_WEEK` · `NEXT_WEEK` · `LAST_MONTH` · `THIS_MONTH` · `NEXT_MONTH` · `LAST_90_DAYS` · `NEXT_90_DAYS` · `THIS_YEAR` · `LAST_YEAR` · `NEXT_YEAR` · `LAST_N_DAYS:n` · `NEXT_N_DAYS:n` · etc.
 
-### filterLogic syntax
+---
 
-Supports numbers referencing 1-based criteria index, `AND`, `OR`, `NOT`, and parentheses:
+### `discriminator`
 
+| | |
+|---|---|
+| **Type** | `String` |
+| **Required** | Required when `displayProfiles` is set |
+| **Default** | `undefined` |
+| **Description** | Field API name whose value is used to select which display profile to apply for each result row and selected-record pill. The field's value is read from the search result node and matched (as a string) against the keys of `displayProfiles`. |
+| **Supports relationships** | Yes — e.g. `"RecordType.DeveloperName"` |
+| **Constraints** | Automatically added to the query's field list by the component. |
+| **Examples** | `"IsPersonAccount"`, `"RecordType.DeveloperName"`, `"Type"` |
+
+> **Important:** The discriminator field value is always compared as a **string**. Boolean fields must use `"true"` / `"false"` as keys in `displayProfiles`, not `true` / `false`.
+
+---
+
+### `displayProfiles`
+
+| | |
+|---|---|
+| **Type** | `Object<String, { subtitleFields: Array }>` |
+| **Required** | Required when `discriminator` is set |
+| **Default** | `undefined` |
+| **Description** | Map from discriminator field values (as strings) to display configuration. When a search result's discriminator value matches a key, that profile's `subtitleFields` are used instead of the top-level `subtitleFields`. If no profile matches, falls back to top-level `subtitleFields` (or no subtitle if not defined). |
+
+**Each profile value shape:**
+
+```jsonc
+{
+  "subtitleFields": [
+    { "apiName": "...", "fieldLabel": "..." }
+  ]
+}
 ```
-"1 AND 2"
-"1 OR 2"
-"(1 OR 2) AND 3"
-"NOT 1"
-"(1 AND 2) OR (3 AND NOT 4)"
+
+The `subtitleFields` array within a profile follows the same rules as the top-level [`subtitleFields`](#subtitlefields) attribute.
+
+**Example:**
+```json
+"discriminator": "IsPersonAccount",
+"displayProfiles": {
+  "true": {
+    "subtitleFields": [
+      { "apiName": "LastName",        "fieldLabel": "Last name" },
+      { "apiName": "PersonNumber__c", "fieldLabel": "Person #"  }
+    ]
+  },
+  "false": {
+    "subtitleFields": [
+      { "apiName": "AccountNumber",  "fieldLabel": "Account #" },
+      { "apiName": "SIRETnumber__c", "fieldLabel": "SIRET"     }
+    ]
+  }
+}
 ```
 
 ---
@@ -505,3 +791,27 @@ The test suite covers:
 - The `lightning/uiGraphQLApi` wire requires **Local Dev** or a connected org to resolve at runtime
 - `displayProfiles` keys are matched by **string value** of the discriminator field — use `"true"` / `"false"` as keys, not `true` / `false`
 - `in` and `nin` operators expect the value to be a JavaScript array
+
+---
+
+## Contributing
+
+Contributions are welcome! Feel free to open an issue or submit a pull request.
+
+1. Fork the repository
+2. Create a feature branch: `git checkout -b feature/my-improvement`
+3. Commit your changes: `git commit -m "Add my improvement"`
+4. Push to the branch: `git push origin feature/my-improvement`
+5. Open a Pull Request
+
+Please make sure all tests pass before submitting:
+
+```bash
+npm test
+```
+
+---
+
+## License
+
+[MIT](LICENSE) — free to use, modify, and distribute.
