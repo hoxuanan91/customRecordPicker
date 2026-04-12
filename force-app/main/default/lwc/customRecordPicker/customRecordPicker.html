@@ -1,0 +1,106 @@
+<template>
+    <div class="slds-form-element">
+        <!-- Selected state: custom record display -->
+        <template lwc:if={isSelected}>
+            <label class="slds-form-element__label">
+                <template lwc:if={required}>
+                    <abbr class="slds-required" title="required">*</abbr>
+                </template>
+                {label}
+            </label>
+            <div class="slds-form-element__control">
+                <div class="selected-record slds-media">
+                    <template lwc:if={hasIcon}>
+                        <span class="slds-media__figure slds-listbox__option-icon">
+                            <lightning-icon icon-name={iconName} size="small" alternative-text="icon"></lightning-icon>
+                        </span>
+                    </template>
+                    <span class="slds-media__body">
+                        <span class="slds-listbox__option-text slds-listbox__option-text_entity">{_selectedTitle}</span>
+                        <template lwc:if={_selectedSubtitle}>
+                            <span class="slds-listbox__option-meta slds-listbox__option-meta_entity">{_selectedSubtitle}</span>
+                        </template>
+                    </span>
+                    <button class="slds-button slds-button_icon selected-record__clear"
+                            onclick={handleClear}
+                            disabled={disabled}
+                            title="Effacer la sélection"
+                            type="button">
+                        <lightning-icon icon-name="utility:close" size="xx-small" alternative-text="Effacer"></lightning-icon>
+                    </button>
+                </div>
+            </div>
+        </template>
+
+        <!-- Search state: lightning-input type search + dropdown -->
+        <template lwc:else>
+            <div class={comboboxContainerClass}>
+                <lightning-input
+                    type="search"
+                    label={label}
+                    placeholder={placeholder}
+                    disabled={disabled}
+                    required={required}
+                    onchange={handleInput}
+                    onfocus={handleFocus}
+                    onkeydown={handleKeyDown}
+                ></lightning-input>
+
+                <!-- Dropdown list -->
+                <template lwc:if={showDropdown}>
+                    <div id={listboxId}
+                         class="crp-dropdown"
+                         role="listbox">
+                        <ul class="slds-listbox slds-listbox_vertical" role="presentation">
+
+                            <!-- Loading spinner -->
+                            <template lwc:if={_isLoading}>
+                                <li class="slds-listbox__item slds-align_absolute-center slds-p-around_medium" role="presentation">
+                                    <lightning-spinner alternative-text="Chargement" size="small"></lightning-spinner>
+                                </li>
+                            </template>
+
+                            <!-- Results -->
+                            <template lwc:elseif={hasResults}>
+                                <template for:each={displayResults} for:item="item">
+                                    <li key={item.id}
+                                        class="slds-listbox__item"
+                                        role="presentation">
+                                        <div class={item.optionClass}
+                                             role="option"
+                                             data-id={item.id}
+                                             data-index={item.optionIndex}
+                                             aria-selected={item.ariaSelected}
+                                             onclick={handleOptionClick}>
+                                            <template lwc:if={hasIcon}>
+                                                <span class="slds-media__figure slds-listbox__option-icon">
+                                                    <lightning-icon icon-name={iconName} size="small" alternative-text="icon"></lightning-icon>
+                                                </span>
+                                            </template>
+                                            <span class="slds-media__body">
+                                                <span class="slds-listbox__option-text slds-listbox__option-text_entity">{item.title}</span>
+                                                <template lwc:if={item.subtitle}>
+                                                    <span class="slds-listbox__option-meta slds-listbox__option-meta_entity">{item.subtitle}</span>
+                                                </template>
+                                            </span>
+                                        </div>
+                                    </li>
+                                </template>
+                            </template>
+                            <template lwc:elseif={_showEmptyMessage}>
+                                <li class="slds-listbox__item slds-align_absolute-center slds-p-around_small" role="presentation">
+                                    <span class="slds-text-body_small slds-text-color_weak">{emptyMessage}</span>
+                                </li>
+                            </template>
+                        </ul>
+                    </div>
+                </template>
+            </div>
+        </template>
+
+        <!-- Error message (validation or query error) -->
+        <template lwc:if={hasError}>
+            <div class="slds-form-element__help" aria-live="assertive">{_displayError}</div>
+        </template>
+    </div>
+</template>

@@ -1,0 +1,6 @@
+node_modules/
+.coverage/
+.localdevserver/
+.sfdx/
+.sf/
+*.log

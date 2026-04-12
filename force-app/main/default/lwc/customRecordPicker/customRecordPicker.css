@@ -1,0 +1,121 @@
+/* ─── customRecordPicker ─── SLDS 2 styling hooks ───────────────────────── */
+
+:host {
+    display: block;
+}
+
+/* Keep dropdown in overlay mode so it does not push components below */
+.slds-combobox_container {
+    position: relative;
+}
+
+.crp-dropdown {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    margin-top: 0;
+    max-height: 15rem;
+    overflow-y: auto;
+    z-index: 7001;
+    box-sizing: border-box;
+    background-color: var(--slds-g-color-neutral-base-100, #ffffff);
+    border: 1px solid var(--slds-g-color-border-base-1, #c9c9c9);
+    border-radius: 0.25rem;
+    box-shadow: 0 2px 3px 0 rgba(0, 0, 0, 0.16);
+    padding: 0.25rem 0;
+}
+
+/* Option hover */
+.slds-listbox__option:hover {
+    background-color: var(--slds-g-color-neutral-base-95, #f3f3f3);
+    cursor: pointer;
+}
+
+/* Option focus (keyboard navigation) */
+.slds-listbox__option.slds-has-focus {
+    background-color: var(--slds-g-color-neutral-base-95, #f3f3f3);
+}
+
+/* Subtitle text */
+.slds-listbox__option-meta_entity {
+    color: var(--slds-g-color-neutral-base-50, #706e6b);
+}
+
+/* ─── Selected record display ──────────────────────────────────────────── */
+
+.selected-record {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--slds-g-color-border-base-1, #c9c9c9);
+    border-radius: 0.25rem;
+    background-color: var(--slds-g-color-neutral-base-100, #ffffff);
+    min-height: 2rem;
+}
+
+.selected-record:hover {
+    background-color: var(--slds-g-color-neutral-base-95, #f3f3f3);
+}
+
+.selected-record .slds-media__body {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+}
+
+.selected-record .slds-listbox__option-text_entity {
+    display: block;
+    font-size: 0.8125rem;
+    font-weight: 400;
+    color: var(--slds-g-color-neutral-base-10, #181818);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.selected-record .slds-listbox__option-meta_entity {
+    display: block;
+    font-size: 0.75rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.selected-record__clear {
+    flex-shrink: 0;
+    margin-left: 0.5rem;
+    padding: 0.25rem;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--slds-g-color-neutral-base-50, #706e6b);
+}
+
+.selected-record__clear:hover {
+    background-color: var(--slds-g-color-neutral-base-80, #d8d8d8);
+    color: var(--slds-g-color-neutral-base-10, #181818);
+}
+
+.selected-record__clear:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+}
+
+/* Error state */
+.slds-has-error .slds-combobox__input,
+.slds-has-error input {
+    border-color: var(--slds-g-color-error-base-40, #c23934);
+    box-shadow: var(--slds-g-color-error-base-40, #c23934) 0 0 0 1px inset;
+}
+
+.slds-form-element__help {
+    color: var(--slds-g-color-error-base-40, #c23934);
+    font-size: 0.75rem;
+    margin-top: 0.25rem;
+}

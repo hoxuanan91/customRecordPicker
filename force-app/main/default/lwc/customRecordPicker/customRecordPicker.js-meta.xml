@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<LightningComponentBundle xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>66.0</apiVersion>
+    <isExposed>true</isExposed>
+    <masterLabel>Custom Record Picker</masterLabel>
+    <description>Configurable record picker component with GraphQL search.</description>
+    <targets>
+        <target>lightning__AppPage</target>
+        <target>lightning__FlowScreen</target>
+        <target>lightning__HomePage</target>
+        <target>lightning__RecordPage</target>
+        <target>lightningCommunity__Default</target>
+    </targets>
+    <targetConfigs>
+        <targetConfig
+            targets="lightning__AppPage,lightning__HomePage,lightning__RecordPage,lightningCommunity__Default"
+        >
+            <property
+                name="config"
+                label="Configuration (JSON)"
+                type="String"
+                required="true"
+                description="JSON configuration object with all picker settings (label, objectApiName, titleField, subtitleFields, searchFields, iconName, filter, placeholder, required, maxResults, minimumSearchLength)"
+            />
+            <property
+                name="disabled"
+                label="Disabled"
+                type="Boolean"
+                default="false"
+                description="Whether the picker is disabled"
+            />
+            <property
+                name="width"
+                label="Width"
+                type="String"
+                description="Optional component width (examples: 320px, 50%, 24rem, auto)"
+            />
+            <property
+                name="selectedRecordId"
+                label="Selected Record ID"
+                type="String"
+                description="The ID of the selected record"
+            />
+        </targetConfig>
+        <targetConfig
+            targets="lightning__FlowScreen">
+            <property
+                name="config"
+                label="Configuration (JSON)"
+                type="String"
+                role="inputOnly"
+                required="true"
+                description="JSON configuration object with all picker settings"
+            />
+            <property
+                name="disabled"
+                label="Disabled"
+                type="Boolean"
+                role="inputOnly"
+                default="false"
+                description="Whether the picker is disabled"
+            />
+            <property
+                name="width"
+                label="Width"
+                type="String"
+                role="inputOnly"
+                description="Optional component width (examples: 320px, 50%, 24rem, auto)"
+            />
+            <property
+                name="selectedRecordId"
+                label="Selected Record ID"
+                type="String"
+                description="The ID of the selected record"
+            />
+            <property
+                name="useFlow"
+                label="Use Flow Context"
+                type="Boolean"
+                default="true"
+                description="Enable Flow context mode (use FlowAttributeChangeEvent)"
+            />
+        </targetConfig>
+    </targetConfigs>
+</LightningComponentBundle>
