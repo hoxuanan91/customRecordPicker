@@ -2,6 +2,63 @@
 
 A configurable Lightning Web Component (LWC) that replicates the native `lightning-record-picker` experience, with extended capabilities:
 
+---
+
+## Demo
+
+The demo below shows the component configured for **Account search with display profiles** — searching across personal accounts (`Personal_Account` record type) and business accounts (`B2C` record type). Each type displays different subtitle fields based on the `RecordType.DeveloperName` discriminator.
+
+https://github.com/hoxuanan91/customRecordPicker/raw/master/docs/Demo_custom_record_picker.mp4
+
+### Demo scenario — Account search with discriminator
+
+**What is shown:**
+- Typing in the search bar triggers a GraphQL search on `Account.Name`
+- Results appear in a dropdown below the search bar
+- **Personal accounts** (`Personal_Account`) show: ID Salesforce · Identifiant (`PersonIdentifiant__c`) · Source
+- **Business accounts** (`B2C`) show: ID Salesforce · Identifiant (`CompanyIdentifiant__c`) · Source
+- Selecting a record collapses the input into a pill showing the name and the correct subtitle for that account type
+- The clear button resets the picker back to the search state
+
+**Config used in this demo:**
+
+```json
+{
+  "label": "Tiers payeurs",
+  "objectApiName": "Account",
+  "titleField": "Name",
+  "searchFields": [
+    { "apiName": "Name" }
+  ],
+  "iconName": "standard:account",
+  "discriminator": "RecordType.DeveloperName",
+  "displayProfiles": {
+    "Personal_Account": {
+      "subtitleFields": [
+        { "apiName": "Id",                              "fieldLabel": "ID Salesforce" },
+        { "apiName": "hoxuana_a__PersonIdentifiant__c", "fieldLabel": "Identifiant" },
+        { "apiName": "AccountSource",                   "fieldLabel": "Source" }
+      ]
+    },
+    "B2C": {
+      "subtitleFields": [
+        { "apiName": "Id",                               "fieldLabel": "ID Salesforce" },
+        { "apiName": "hoxuana_a__CompanyIdentifiant__c", "fieldLabel": "Identifiant" },
+        { "apiName": "AccountSource",                    "fieldLabel": "Source" }
+      ]
+    }
+  },
+  "placeholder": "Rechercher un compte…",
+  "required": true,
+  "maxResults": 20,
+  "minimumSearchLength": 2
+}
+```
+
+> **Note on `discriminator`:** The demo uses `RecordType.DeveloperName` (a relationship field) instead of `IsPersonAccount` because the Person Accounts feature is not enabled on the demo org. The behavior is identical — the component reads the discriminator field value from each result node and selects the matching `displayProfiles` key (`"Personal_Account"` or `"B2C"`).
+
+---
+
 - **Display profiles** — show different subtitle fields depending on a discriminator field (e.g. `IsPersonAccount`)
 - **Flexible filter system** — supports filter criteria, `filterLogic` expressions (`AND`, `OR`, `NOT`, parentheses), and Salesforce date **literals** (`TODAY`, `LAST_MONTH`, `NEXT_YEAR`, …)
 - **Multi-field search** — search across multiple fields simultaneously (String, Picklist)
