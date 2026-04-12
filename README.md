@@ -8,7 +8,7 @@ A configurable Lightning Web Component (LWC) that replicates the native `lightni
 
 The demo below shows the component configured for **Account search with display profiles** — searching across personal accounts (`Personal_Account` record type) and business accounts (`B2C` record type). Each type displays different subtitle fields based on the `RecordType.DeveloperName` discriminator.
 
-https://github.com/hoxuanan91/customRecordPicker/raw/master/docs/Demo_custom_record_picker.mp4
+![Demo customRecordPicker](docs/Demo_custom_record_picker.gif)
 
 ### Demo scenario — Account search with discriminator
 
