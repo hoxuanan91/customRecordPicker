@@ -56,7 +56,13 @@ function validateOperator(op) {
     }
 }
 
-function sanitizeSearchTerm(term) {
+// Escape SOSL reserved characters (keeps * so callers can append wildcard)
+function sanitizeSoslTerm(term) {
+    return term.replace(/[?&|!{}[\]()^~:\\"'+-]/g, "\\$&");
+}
+
+// Escape SQL LIKE special characters
+function sanitizeLikeTerm(term) {
     return term.replace(/[%_]/g, "\\$&");
 }
 
@@ -425,6 +431,11 @@ export default class CustomRecordPicker extends OmniscriptBaseMixin(
    "iconName":"standard:account",
    "filter":{
       "criteria":[
+        {
+          "apiName": "IsPersonAccount",
+          "operator": "eq",
+          "value": true
+        }
       ],
       "filterLogic":"1"
    },
@@ -668,9 +679,6 @@ export default class CustomRecordPicker extends OmniscriptBaseMixin(
     _clickOutsideHandler;
     _results = [];
     _perfSearchTermSetAt;
-    _perfQueryBuiltAt;
-    _seenIds = new Set();
-    _pendingSearchCount = 0;
 
     // ─── Lifecycle ───────────────────────────────────────────────────────────
 
@@ -769,68 +777,33 @@ export default class CustomRecordPicker extends OmniscriptBaseMixin(
         return parts.length ? parts.join(" | ") : undefined;
     }
 
-    // ─── Wire: GraphQL search (one wire per searchField, up to 5) ───────────
-    // Each wire fires an independent query for its field. Results are merged
-    // progressively: spinner stops on first result, more results added as
-    // subsequent queries complete.
+    // ─── Wire: SOSL search ───────────────────────────────────────────────────
 
-    @wire(graphql, { query: "$_graphqlQuery0", variables: "$_graphqlVariables0" })
-    _wiredSearch0({ data, errors }) { this._handleFieldResult(0, data, errors); }
-
-    @wire(graphql, { query: "$_graphqlQuery1", variables: "$_graphqlVariables1" })
-    _wiredSearch1({ data, errors }) { this._handleFieldResult(1, data, errors); }
-
-    @wire(graphql, { query: "$_graphqlQuery2", variables: "$_graphqlVariables2" })
-    _wiredSearch2({ data, errors }) { this._handleFieldResult(2, data, errors); }
-
-    @wire(graphql, { query: "$_graphqlQuery3", variables: "$_graphqlVariables3" })
-    _wiredSearch3({ data, errors }) { this._handleFieldResult(3, data, errors); }
-
-    @wire(graphql, { query: "$_graphqlQuery4", variables: "$_graphqlVariables4" })
-    _wiredSearch4({ data, errors }) { this._handleFieldResult(4, data, errors); }
-
-    _handleFieldResult(fieldIndex, data, errors) {
-        // Ignore initialization calls (wire fires with undefined before first real response)
-        if (data == null && (errors == null || errors === undefined)) return;
-        // Ignore wires for out-of-bounds field indices (unused slots)
-        if (fieldIndex >= this._searchFieldsArray.length) return;
-
+    @wire(graphql, { query: "$_graphqlQuery", variables: "$_graphqlVariables" })
+    _wiredSearchResults({ data, errors }) {
         const now = performance.now();
         const sinceSearch = this._perfSearchTermSetAt
             ? (now - this._perfSearchTermSetAt).toFixed(2)
             : "N/A";
-        const fieldName = this._searchFieldsArray[fieldIndex]?.apiName || `field${fieldIndex}`;
-        console.log(`###[PERF] Field[${fieldIndex}] (${fieldName}) response at ${now.toFixed(2)}ms (${sinceSearch}ms after search)`);
-
+        console.log(`###[PERF] SOSL results received at ${now.toFixed(2)}ms (${sinceSearch}ms after search)`);
+        this._isLoading = false;
         if (data) {
             this._errorMessage = undefined;
-            const edges = data.uiapi?.query?.[this.objectApiName]?.edges || [];
-            const newResults = edges
-                .filter((edge) => !this._seenIds.has(edge.node.Id))
-                .map((edge) => {
-                    this._seenIds.add(edge.node.Id);
-                    const profile = this._resolveProfileForNode(edge.node);
-                    const effectiveTitleField = profile?.titleField || this.titleField;
-                    return {
-                        id: edge.node.Id,
-                        title: this._readNodeField(edge.node, effectiveTitleField),
-                        subtitle: this._buildFormattedSubtitle(edge.node, profile),
-                        node: edge.node,
-                    };
-                });
-            if (newResults.length > 0) {
-                this._results = [...this._results, ...newResults];
-                console.log(`###[PERF] Field[${fieldIndex}] (${fieldName}) added ${newResults.length} result(s) — total: ${this._results.length}`);
-            }
-            // Stop spinner as soon as the first results are available
-            if (this._isLoading && this._results.length > 0) {
-                console.log(`###[PERF] First results available at ${now.toFixed(2)}ms (${sinceSearch}ms) — stopping spinner`);
-                this._isLoading = false;
-            }
+            const edges = data.uiapi?.search?.[this.objectApiName]?.edges || [];
+            console.log(`###[PERF] SOSL returned ${edges.length} result(s)`);
+            this._results = edges.map((edge) => {
+                const profile = this._resolveProfileForNode(edge.node);
+                const effectiveTitleField = profile?.titleField || this.titleField;
+                return {
+                    id: edge.node.Id,
+                    title: this._readNodeField(edge.node, effectiveTitleField),
+                    subtitle: this._buildFormattedSubtitle(edge.node, profile),
+                    node: edge.node,
+                };
+            });
         }
-
         if (errors) {
-            console.error(`customRecordPicker: GraphQL error for field[${fieldIndex}] (${fieldName})`, JSON.stringify(errors));
+            console.error("customRecordPicker: SOSL GraphQL error", JSON.stringify(errors));
             const messages = [];
             for (const err of errors) {
                 if (err.errorType === "adapterError" && Array.isArray(err.error)) {
@@ -850,16 +823,10 @@ export default class CustomRecordPicker extends OmniscriptBaseMixin(
                     messages.push(err.message);
                 }
             }
-            if (messages.length) {
-                this._errorMessage = messages.join(" | ");
-            }
-        }
-
-        // Decrement pending count; stop spinner when all field queries have responded
-        this._pendingSearchCount = Math.max(0, this._pendingSearchCount - 1);
-        if (this._pendingSearchCount === 0) {
-            console.log(`###[PERF] All ${this._searchFieldsArray.length} field quer${this._searchFieldsArray.length === 1 ? "y" : "ies"} complete at ${now.toFixed(2)}ms (${sinceSearch}ms after search) — total results: ${this._results.length}`);
-            this._isLoading = false;
+            this._errorMessage = messages.length
+                ? messages.join(" | ")
+                : "Erreur lors de la recherche";
+            this._results = [];
         }
     }
 
@@ -890,31 +857,38 @@ export default class CustomRecordPicker extends OmniscriptBaseMixin(
         return parts.length ? parts.join(" | ") : undefined;
     }
 
-    // ─── Per-field filter data ──────────────────────────────────────────────────
-    // Builds the where clause + variables for ONE search field (fieldIndex).
-    // The filter criteria from config are identical for every field query.
+    // ─── SOSL + field-specific WHERE filter ─────────────────────────────────
+    // Strategy:
+    //   1. SOSL FIND pre-filters Account records via the search index (fast).
+    //   2. WHERE OR LIKE restricts those results to records where a searchField
+    //      actually contains the term (field-specific, substring-safe).
+    // A single $likeSearchTerm variable (%term%) is reused across all fields.
 
-    _filterDataForField(fieldIndex) {
-        const field = this._searchFieldsArray[fieldIndex];
-        if (!field) return null;
-
+    get _filterData() {
         const filterVariables = {};
         const variableDeclarations = [];
         const conditions = [];
 
-        // Search condition — single field only
-        const varName = "searchTerm";
-        const type = field.dataType || "String";
-        const isExactMatch = type === "Picklist";
-        variableDeclarations.push(`$${varName}: ${type}`);
-        filterVariables[varName] = isExactMatch
-            ? this._searchTerm
-            : `%${sanitizeSearchTerm(this._searchTerm)}%`;
-        const { prefix, suffix } = fieldPathToWhereNesting(field.apiName);
-        const op = isExactMatch ? "eq" : "like";
-        conditions.push(`{ ${prefix}: { ${op}: $${varName} }${suffix} }`);
+        // Search condition — OR LIKE across searchFields
+        if (
+            this._searchTerm &&
+            this._searchTerm.length >= this._cfg.minimumSearchLength &&
+            this._searchFieldsArray.length > 0
+        ) {
+            const likeVal = `%${sanitizeLikeTerm(this._searchTerm)}%`;
+            variableDeclarations.push("$likeSearchTerm: String");
+            filterVariables.likeSearchTerm = likeVal;
+            const searchParts = this._searchFieldsArray.map((field) => {
+                const { prefix, suffix } = fieldPathToWhereNesting(field.apiName);
+                return `{ ${prefix}: { like: $likeSearchTerm }${suffix} }`;
+            });
+            conditions.push(
+                searchParts.length === 1
+                    ? searchParts[0]
+                    : `{ or: [${searchParts.join(", ")}] }`,
+            );
+        }
 
-        // Filter criteria (shared across all field queries)
         const filter = this._cfg.filter;
         if (filter?.criteria?.length) {
             const criteriaMap = new Map();
@@ -922,17 +896,17 @@ export default class CustomRecordPicker extends OmniscriptBaseMixin(
                 validateFieldPath(criterion.fieldPath, `filter.criteria[${index}].fieldPath`);
                 validateOperator(criterion.operator);
 
-                const filterVarName = `filterVal${index}`;
-                const { prefix: fPrefix, suffix: fSuffix } = fieldPathToWhereNesting(criterion.fieldPath);
+                const varName = `filterVal${index}`;
+                const { prefix, suffix } = fieldPathToWhereNesting(criterion.fieldPath);
 
                 if (isDateValue(criterion.value)) {
                     const dateGql = serializeDateValue(criterion.value);
-                    criteriaMap.set(index + 1, { _raw: `{ ${fPrefix}: { ${criterion.operator}: ${dateGql} }${fSuffix} }` });
+                    criteriaMap.set(index + 1, { _raw: `{ ${prefix}: { ${criterion.operator}: ${dateGql} }${suffix} }` });
                 } else {
-                    criteriaMap.set(index + 1, { _raw: `{ ${fPrefix}: { ${criterion.operator}: $${filterVarName} }${fSuffix} }` });
+                    criteriaMap.set(index + 1, { _raw: `{ ${prefix}: { ${criterion.operator}: $${varName} }${suffix} }` });
                     const gqlType = criterion.dataType || inferGraphQLType(criterion.value);
-                    variableDeclarations.push(`$${filterVarName}: ${gqlType}`);
-                    filterVariables[filterVarName] = criterion.value;
+                    variableDeclarations.push(`$${varName}: ${gqlType}`);
+                    filterVariables[varName] = criterion.value;
                 }
             });
 
@@ -948,49 +922,44 @@ export default class CustomRecordPicker extends OmniscriptBaseMixin(
         }
 
         let whereClause = "";
-        if (conditions.length > 1) {
-            whereClause = `where: { and: [${conditions.join(", ")}] }`;
-        } else if (conditions.length === 1) {
+        if (conditions.length === 1) {
             whereClause = `where: ${conditions[0]}`;
+        } else if (conditions.length > 1) {
+            whereClause = `where: { and: [${conditions.join(", ")}] }`;
         }
 
         return { whereClause, variableDeclarations, filterVariables };
     }
 
-    // ─── Per-field query/variable builders ───────────────────────────────────
+    // ─── SOSL GraphQL query ──────────────────────────────────────────────────
 
-    _buildSearchQueryForField(fieldIndex) {
+    get _graphqlQuery() {
         if (this._configError) return undefined;
         if (!this.objectApiName || !this.titleField) return undefined;
         if (!this._searchTerm || this._searchTerm.length < this._cfg.minimumSearchLength) return undefined;
-        if (fieldIndex >= this._searchFieldsArray.length) return undefined;
 
-        const filterData = this._filterDataForField(fieldIndex);
-        if (!filterData) return undefined;
-
-        const { whereClause, variableDeclarations } = filterData;
+        const { whereClause, variableDeclarations } = this._filterData;
+        // $soslTerm  → passed to SOSL FIND (index-based pre-filter, uses * wildcard)
+        // $likeSearchTerm → comes from _filterData, used in WHERE OR LIKE (field-specific)
+        const allVarDecl = ["$soslTerm: String", ...variableDeclarations];
+        const varDecl = `(${allVarDecl.join(", ")})`;
         const allFieldsGql = this._allQueryApiNames
             .map((f) => fieldToGraphQL(f))
             .join("\n                                    ");
-        const varDecl = variableDeclarations.length > 0
-            ? `(${variableDeclarations.join(", ")})`
-            : "";
-        const fieldName = this._searchFieldsArray[fieldIndex].apiName;
 
         const now = performance.now();
         const sinceSearch = this._perfSearchTermSetAt
             ? (now - this._perfSearchTermSetAt).toFixed(2)
             : "N/A";
-        console.log(`###[PERF] Building query for field[${fieldIndex}] (${fieldName}) at ${now.toFixed(2)}ms (${sinceSearch}ms after search)`);
+        console.log(`###[PERF] SOSL query built at ${now.toFixed(2)}ms (${sinceSearch}ms after search)`);
 
         return gql`
-            query SearchRecords_Field${fieldIndex}${varDecl} {
+            query SearchRecords${varDecl} {
                 uiapi {
-                    query {
+                    search(term: $soslTerm) {
                         ${this.objectApiName}(
-                            upperBound: 50
-                            ${whereClause}
                             first: ${this._cfg.maxResults}
+                            ${whereClause}
                         ) {
                             edges {
                                 node {
@@ -1005,26 +974,16 @@ export default class CustomRecordPicker extends OmniscriptBaseMixin(
         `;
     }
 
-    _buildSearchVariablesForField(fieldIndex) {
+    get _graphqlVariables() {
         if (this._configError) return undefined;
         if (!this._searchTerm || this._searchTerm.length < this._cfg.minimumSearchLength) return undefined;
-        if (fieldIndex >= this._searchFieldsArray.length) return undefined;
-        const filterData = this._filterDataForField(fieldIndex);
-        return filterData ? filterData.filterVariables : undefined;
+        const { filterVariables } = this._filterData;
+        // soslTerm  : used by SOSL FIND — trailing * for prefix-wildcard matching
+        //             e.g. "dupont" → "dupont*" matches "Dupont SA", "Dupontier"
+        // likeSearchTerm: already built in _filterData as "%term%"
+        //             handles substring matching in the WHERE OR LIKE conditions
+        return { soslTerm: `${sanitizeSoslTerm(this._searchTerm)}*`, ...filterVariables };
     }
-
-    // ─── Per-field reactive getters (supports up to 5 concurrent searchFields) ─
-
-    get _graphqlQuery0() { return this._buildSearchQueryForField(0); }
-    get _graphqlVariables0() { return this._buildSearchVariablesForField(0); }
-    get _graphqlQuery1() { return this._buildSearchQueryForField(1); }
-    get _graphqlVariables1() { return this._buildSearchVariablesForField(1); }
-    get _graphqlQuery2() { return this._buildSearchQueryForField(2); }
-    get _graphqlVariables2() { return this._buildSearchVariablesForField(2); }
-    get _graphqlQuery3() { return this._buildSearchQueryForField(3); }
-    get _graphqlVariables3() { return this._buildSearchVariablesForField(3); }
-    get _graphqlQuery4() { return this._buildSearchQueryForField(4); }
-    get _graphqlVariables4() { return this._buildSearchVariablesForField(4); }
 
     // ─── Template getters ────────────────────────────────────────────────────
 
@@ -1194,15 +1153,6 @@ export default class CustomRecordPicker extends OmniscriptBaseMixin(
                 );
             }
 
-            if (
-                !Array.isArray(rawConfig.searchFields) ||
-                rawConfig.searchFields.length === 0
-            ) {
-                throw new Error(
-                    "Configuration invalide: searchFields est obligatoire.",
-                );
-            }
-
             validateObjectName(rawConfig.objectApiName);
             validateFieldPath(this._cfg.titleField, "titleField");
 
@@ -1210,6 +1160,8 @@ export default class CustomRecordPicker extends OmniscriptBaseMixin(
                 validateFieldPath(fieldPath, `subtitleFields[${index}].apiName`),
             );
 
+            // searchFields is optional with SOSL (searches all indexed fields).
+            // If provided, validate the field paths.
             this._searchFieldsArray.forEach((field, index) => {
                 if (!field?.apiName) {
                     throw new Error(
