@@ -21,7 +21,6 @@ const ALLOWED_OPERATORS = new Set([
     "in",
     "nin",
 ]);
-const SALESFORCE_ID_REGEX = /^[a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?$/;
 const DEBOUNCE_DELAY = 300;
 const MAX_RESULTS_CAP = 100;
 const DEFAULT_MAX_RESULTS = 10;
@@ -63,11 +62,6 @@ function sanitizeSoslTerm(term) {
     return term.replace(/[?&|!{}[\]()^~:\\"'+-]/g, "\\$&");
 }
 
-// Escape SQL LIKE special characters
-function sanitizeLikeTerm(term) {
-    return term.replace(/[%_]/g, "\\$&");
-}
-
 function parseLooseJsonString(raw) {
     if (typeof raw !== "string") return raw;
     let normalized = raw.trim();
@@ -85,256 +79,6 @@ function parseLooseJsonString(raw) {
 
     normalized = normalized.replace(/,\s*([}\]])/g, "$1");
     return JSON.parse(normalized);
-}
-
-// ─── Filter logic parser (recursive descent) ────────────────────────────────
-
-function tokenize(filterLogic) {
-    const tokens = [];
-    let i = 0;
-    const str = filterLogic.toUpperCase().trim();
-    while (i < str.length) {
-        if (str[i] === " " || str[i] === "\t") {
-            i++;
-            continue;
-        }
-        if (str[i] === "(") {
-            tokens.push({ type: "LPAREN" });
-            i++;
-            continue;
-        }
-        if (str[i] === ")") {
-            tokens.push({ type: "RPAREN" });
-            i++;
-            continue;
-        }
-        if (
-            str.startsWith("AND", i) &&
-            (i + 3 >= str.length || /\W/.test(str[i + 3]))
-        ) {
-            tokens.push({ type: "AND" });
-            i += 3;
-            continue;
-        }
-        if (
-            str.startsWith("OR", i) &&
-            (i + 2 >= str.length || /\W/.test(str[i + 2]))
-        ) {
-            tokens.push({ type: "OR" });
-            i += 2;
-            continue;
-        }
-        if (
-            str.startsWith("NOT", i) &&
-            (i + 3 >= str.length || /\W/.test(str[i + 3]))
-        ) {
-            tokens.push({ type: "NOT" });
-            i += 3;
-            continue;
-        }
-        const numMatch = str.slice(i).match(/^\d+/);
-        if (numMatch) {
-            tokens.push({ type: "NUMBER", value: parseInt(numMatch[0], 10) });
-            i += numMatch[0].length;
-            continue;
-        }
-        throw new Error(
-            `customRecordPicker: Unexpected character "${str[i]}" in filterLogic at position ${i}`,
-        );
-    }
-    return tokens;
-}
-
-function parseFilterLogic(filterLogic, criteriaMap) {
-    const tokens = tokenize(filterLogic);
-    let pos = 0;
-    function peek() {
-        return tokens[pos];
-    }
-    function consume(type) {
-        const t = tokens[pos];
-        if (!t || t.type !== type) {
-            throw new Error(
-                `customRecordPicker: Expected ${type} at position ${pos} in filterLogic, got ${t?.type || "EOF"}`,
-            );
-        }
-        pos++;
-        return t;
-    }
-    function parseExpr() {
-        let left = parseTerm();
-        while (peek()?.type === "OR") {
-            consume("OR");
-            left = { or: [left, parseTerm()] };
-        }
-        return left;
-    }
-    function parseTerm() {
-        let left = parseFactor();
-        while (peek()?.type === "AND") {
-            consume("AND");
-            left = { and: [left, parseFactor()] };
-        }
-        return left;
-    }
-    function parseFactor() {
-        if (peek()?.type === "NOT") {
-            consume("NOT");
-            return { not: parseFactor() };
-        }
-        if (peek()?.type === "LPAREN") {
-            consume("LPAREN");
-            const expr = parseExpr();
-            consume("RPAREN");
-            return expr;
-        }
-        const token = consume("NUMBER");
-        const criterion = criteriaMap.get(token.value);
-        if (!criterion) {
-            throw new Error(
-                `customRecordPicker: filterLogic references criterion ${token.value} which does not exist`,
-            );
-        }
-        return criterion;
-    }
-    const result = parseExpr();
-    if (pos < tokens.length) {
-        throw new Error(
-            `customRecordPicker: Unexpected token at position ${pos}`,
-        );
-    }
-    return result;
-}
-
-function flattenLogic(node) {
-    if (!node) return node;
-    if (node.and) {
-        const flat = [];
-        for (const child of node.and) {
-            const f = flattenLogic(child);
-            if (f.and) {
-                flat.push(...f.and);
-            } else {
-                flat.push(f);
-            }
-        }
-        return { and: flat };
-    }
-    if (node.or) {
-        const flat = [];
-        for (const child of node.or) {
-            const f = flattenLogic(child);
-            if (f.or) {
-                flat.push(...f.or);
-            } else {
-                flat.push(f);
-            }
-        }
-        return { or: flat };
-    }
-    if (node.not) {
-        return { not: flattenLogic(node.not) };
-    }
-    return node;
-}
-
-// ─── GraphQL helpers ─────────────────────────────────────────────────────────
-
-function fieldToGraphQL(fieldPath) {
-    const parts = fieldPath.split(".");
-    let result = "";
-    for (let i = 0; i < parts.length - 1; i++) {
-        result += `${parts[i]} { `;
-    }
-    const leaf = parts[parts.length - 1];
-    result += leaf === "Id" ? "Id" : `${leaf} { value displayValue }`;
-    for (let i = 0; i < parts.length - 1; i++) {
-        result += " }";
-    }
-    return result;
-}
-
-function fieldPathToWhereNesting(fieldPath) {
-    const parts = fieldPath.split(".");
-    if (parts.length === 1) return { prefix: parts[0], suffix: "" };
-    let prefix = "",
-        suffix = "";
-    for (let i = 0; i < parts.length - 1; i++) {
-        prefix += `${parts[i]}: { `;
-        suffix += " }";
-    }
-    prefix += parts[parts.length - 1];
-    return { prefix, suffix };
-}
-
-function serializeWhereClause(node) {
-    if (!node) return "";
-    if (node.and)
-        return `{ and: [${node.and.map(serializeWhereClause).join(", ")}] }`;
-    if (node.or)
-        return `{ or: [${node.or.map(serializeWhereClause).join(", ")}] }`;
-    if (node.not) return `{ not: ${serializeWhereClause(node.not)} }`;
-    if (node._raw) return node._raw;
-    return "";
-}
-
-/**
- * Check if a filter value is a date/datetime input object.
- * Supports:
- *   { literal: "TODAY" }           → simple DATE_LITERAL enum
- *   { literal: "LAST_N_DAYS:30" }  → auto-converted to range
- *   { range: { last_n_days: 30 } } → explicit DateRange
- */
-function isDateValue(value) {
-    if (value === null || typeof value !== "object") return false;
-    return (
-        typeof value.literal === "string" ||
-        (typeof value.range === "object" && value.range !== null)
-    );
-}
-
-/**
- * Serialize a date value object into inline GraphQL syntax.
- *
- * Examples:
- *   { literal: "TODAY" }            → { literal: TODAY }
- *   { literal: "LAST_N_DAYS:30" }   → { range: { last_n_days: 30 } }
- *   { range: { last_n_days: 30 } }  → { range: { last_n_days: 30 } }
- */
-function serializeDateValue(value) {
-    if (typeof value.literal === "string") {
-        const rangeMatch = value.literal.match(/^([A-Z_]+):(\d+)$/);
-        if (rangeMatch) {
-            const rangeName = rangeMatch[1].toLowerCase();
-            const rangeVal = parseInt(rangeMatch[2], 10);
-            return `{ range: { ${rangeName}: ${rangeVal} } }`;
-        }
-        return `{ literal: ${value.literal} }`;
-    }
-    if (value.range && typeof value.range === "object") {
-        const entries = Object.entries(value.range);
-        if (entries.length === 1) {
-            const [key, val] = entries[0];
-            return `{ range: { ${key}: ${val} } }`;
-        }
-    }
-    throw new Error(
-        `customRecordPicker: Invalid date value: ${JSON.stringify(value)}`,
-    );
-}
-
-/**
- * Infer the GraphQL variable type from a filter criterion value.
- */
-function inferGraphQLType(value) {
-    if (value === null) return "String";
-    if (isDateValue(value)) return "DateTime";
-    if (typeof value === "string" && SALESFORCE_ID_REGEX.test(value))
-        return "ID";
-    if (typeof value === "number")
-        return Number.isInteger(value) ? "Int" : "Float";
-    if (typeof value === "boolean") return "Boolean";
-    return "String";
 }
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -781,94 +525,73 @@ export default class CustomRecordPicker extends OmniscriptBaseMixin(
     // ─── APEX Search: SOSL with WHERE filters ────────────────────────────────
 
     /**
-     * Execute SOSL search via Apex
-     * Apex builds: FIND 'term*' RETURNING Object(fields 
-     *   WHERE (searchField LIKE '%term%' ...) AND (criteria filters)
-     * )
+     * Execute SOSL search via Apex.
+     * Apex builds: FIND {term*} IN ALL FIELDS
+     *   RETURNING Object(returnFields WHERE (searchField LIKE '%term%' OR ...) AND (criteria) LIMIT n)
+     *
+     * @param {string} term - the debounced search term (captured to detect stale results)
      */
-    async _executeApexSearch() {
-        if (!this._searchTerm || 
-            this._searchTerm.length < this._cfg.minimumSearchLength) {
-            this._results = [];
-            this._isLoading = false;
-            return;
-        }
+    _executeApexSearch(term) {
+        // Collect all fields the template needs: display fields + search fields + filter fields
+        const filterCriteriaFields = (this._cfg.filter?.criteria || [])
+            .map((c) => c.fieldPath)
+            .filter((f) => f && !f.includes("."));
 
-        this._isLoading = true;
-        this._errorMessage = undefined;
+        const returnFields = [
+            ...new Set([
+                ...this._allQueryApiNames,
+                ...this._searchApiNames,
+                ...filterCriteriaFields,
+            ]),
+        ].filter((f) => f !== "Id");
 
-        try {
-            // ✅ Build the request for Apex
-            const request = {
-                searchTerm: this._searchTerm,
-                objectApiName: this._cfg.objectApiName,
-                searchFields: this._searchApiNames,        // ["Name", "SIRETnumber__c", "Enseigne__c"]
-                maxResults: this._cfg.maxResults,
-                criteria: this._cfg.filter?.criteria || [],
-                filterLogic: this._cfg.filter?.filterLogic
-            };
+        // Serialize each criterion value as JSON so Apex can deserialize it with
+        // JSON.deserializeUntyped() — guarantees correct typing (Boolean, Map for
+        // date literals, List for IN/NIN, etc.)
+        const criteria = (this._cfg.filter?.criteria || []).map((c) => ({
+            fieldPath: c.fieldPath,
+            operator: c.operator,
+            serializedValue: JSON.stringify(c.value !== undefined ? c.value : null),
+        }));
 
-            console.log("📤 [SOSL Apex] Search request:", {
-                searchTerm: request.searchTerm,
-                object: request.objectApiName,
-                searchFields: request.searchFields,
-                criteria: request.criteria
+        const request = {
+            searchTerm: sanitizeSoslTerm(term),
+            objectApiName: this._cfg.objectApiName,
+            searchFields: this._searchApiNames,
+            returnFields,
+            maxResults: this._cfg.maxResults,
+            criteria,
+            filterLogic: this._cfg.filter?.filterLogic || null,
+        };
+
+        search({ request })
+            .then((results) => {
+                // Discard if the user has already typed something else
+                if (this._searchTerm !== term) return;
+                this._isLoading = false;
+                this._errorMessage = undefined;
+                this._results = results.map((result) => {
+                    const node = result.fields;
+                    // _resolveProfileForNode reads plain field values (Boolean, String…)
+                    // which matches the flat Map returned by Apex getPopulatedFieldsAsMap()
+                    const profile = this._resolveProfileForNode(node);
+                    const effectiveTitleField = profile?.titleField || this.titleField;
+                    return {
+                        id: result.id,
+                        title: this._readNodeField(node, effectiveTitleField),
+                        subtitle: this._buildFormattedSubtitle(node, profile),
+                        node,
+                    };
+                });
+            })
+            .catch((error) => {
+                if (this._searchTerm !== term) return;
+                this._isLoading = false;
+                this._results = [];
+                this._errorMessage =
+                    error?.body?.message || error?.message || "Erreur lors de la recherche";
+                console.error("customRecordPicker: Apex search error", error);
             });
-
-            // ✅ Call Apex method (await waits for response)
-            const results = await search({ request });
-
-            console.log("📥 [SOSL Apex] Results:", results);
-
-            this._errorMessage = undefined;
-
-            // ✅ Transform Apex results to template format
-            this._results = results.map((result) => {
-                const profile = this._resolveProfileForFields(result.fields);
-                const effectiveTitleField = profile?.titleField || this.titleField;
-                
-                return {
-                    id: result.id,
-                    title: result.fields[effectiveTitleField] || result.fields.Name || "",
-                    subtitle: this._buildApexSubtitle(result.fields, profile),
-                    node: result.fields,
-                };
-            });
-
-        } catch (error) {
-            console.error("❌ [SOSL Apex] Error:", error);
-            this._errorMessage = error?.body?.message || error.message || "Erreur lors de la recherche";
-            this._results = [];
-
-        } finally {
-            this._isLoading = false;
-        }
-    }
-
-    /**
-     * Build subtitle from Apex result fields
-     */
-    _buildApexSubtitle(fields, profile) {
-        const subtitleFields = profile?.subtitleFields || this._subtitleFieldsArray;
-        
-        // If subtitleFields are configured, use them
-        if (subtitleFields && subtitleFields.length > 0) {
-            const parts = subtitleFields
-                .map((field) => {
-                    const value = fields[field.apiName];
-                    return value ? `${field.fieldLabel} : ${value}` : null;
-                })
-                .filter(Boolean);
-            return parts.length ? parts.join(" | ") : undefined;
-        }
-        
-        // Fallback: show all fields except the title field as subtitle
-        const titleField = profile?.titleField || this.titleField;
-        const parts = Object.keys(fields)
-            .filter(key => key !== titleField && key !== 'Id' && fields[key] != null)
-            .map(key => `${key} : ${fields[key]}`);
-        
-        return parts.length ? parts.join(" | ") : undefined;
     }
 
     // ─── Template getters ────────────────────────────────────────────────────
@@ -952,8 +675,7 @@ export default class CustomRecordPicker extends OmniscriptBaseMixin(
             if (term && term.length >= this._cfg.minimumSearchLength) {
                 this._isLoading = true;
                 this._isDropdownOpen = true;
-                // ✅ Appeler la recherche Apex au lieu de dépendre de @wire
-                this._executeApexSearch();
+                this._executeApexSearch(term);
             } else {
                 this._isLoading = false;
                 this._isDropdownOpen = false;

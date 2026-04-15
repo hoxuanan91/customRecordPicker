@@ -16,18 +16,21 @@ public with sharing class CustomRecordPickerSearchController {
         @AuraEnabled public String searchTerm { get; set; }
         @AuraEnabled public String objectApiName { get; set; }
         @AuraEnabled public List<String> searchFields { get; set; }
+        @AuraEnabled public List<String> returnFields { get; set; }
         @AuraEnabled public Integer maxResults { get; set; }
         @AuraEnabled public List<FilterCriterion> criteria { get; set; }
         @AuraEnabled public String filterLogic { get; set; }
     }
 
     /**
-     * Represents a single filter criterion
+     * Represents a single filter criterion.
+     * value is JSON-serialized as a String to guarantee correct Apex deserialization
+     * for all types (Boolean, String, Number, Date literal objects, Lists).
      */
     public class FilterCriterion {
         @AuraEnabled public String fieldPath { get; set; }
         @AuraEnabled public String operator { get; set; }
-        @AuraEnabled public Object value { get; set; }
+        @AuraEnabled public String serializedValue { get; set; }
     }
 
     /**
@@ -150,27 +153,29 @@ public with sharing class CustomRecordPickerSearchController {
         // For FIND: use prefix wildcard (fast index search)
         String soslTerm = searchTerm + '*';
         
-        // Build field list (SOSL includes Id by default)
-        List<String> allFields = new List<String>{'Id'};
-        
-        // Add search fields if specified
-        if (request.searchFields != null && !request.searchFields.isEmpty()) {
-            for (String field : request.searchFields) {
-                if (!allFields.contains(field)) {
-                    allFields.add(field);
-                }
-            }
+        // Build field list — Id is always included
+        Set<String> allFieldsSet = new Set<String>{'Id'};
+
+        // Add explicitly requested return fields (title, subtitles, discriminator, etc.)
+        if (request.returnFields != null) {
+            allFieldsSet.addAll(request.returnFields);
         }
-        
-        // Add filter criterion fields
+
+        // Add search fields so they are available in the WHERE clause
+        if (request.searchFields != null) {
+            allFieldsSet.addAll(request.searchFields);
+        }
+
+        // Add filter criterion fields so they are available in the WHERE clause
         if (request.criteria != null) {
             for (FilterCriterion criterion : request.criteria) {
-                String baseField = criterion.fieldPath.split('\\.')[0];
-                if (!allFields.contains(baseField)) {
-                    allFields.add(baseField);
+                if (String.isNotBlank(criterion.fieldPath)) {
+                    allFieldsSet.add(criterion.fieldPath.split('\\.')[0]);
                 }
             }
         }
+
+        List<String> allFields = new List<String>(allFieldsSet);
         
         // Build WHERE conditions
         List<String> whereConditions = new List<String>();
@@ -229,12 +234,22 @@ public with sharing class CustomRecordPickerSearchController {
     }
 
     /**
-     * Builds a SOSL WHERE condition for a filter criterion
+     * Builds a SOSL WHERE condition for a filter criterion.
+     * serializedValue is JSON-deserialized here so that all types
+     * (Boolean, Decimal, String, List, Map for date literals) are
+     * correctly typed regardless of how @AuraEnabled deserialized the param.
      */
     private static String buildSoslCondition(FilterCriterion criterion) {
         String field = criterion.fieldPath;
         String operator = criterion.operator.toLowerCase();
-        Object value = criterion.value;
+        Object value;
+        try {
+            value = String.isBlank(criterion.serializedValue)
+                ? null
+                : JSON.deserializeUntyped(criterion.serializedValue);
+        } catch (Exception e) {
+            value = criterion.serializedValue;
+        }
         
         String soslOperator;
         String soslValue;
@@ -285,23 +300,60 @@ public with sharing class CustomRecordPickerSearchController {
     }
 
     /**
-     * Applies filter logic by replacing criterion numbers with actual conditions
+     * Applies filter logic by tokenizing the original logic string and substituting
+     * criterion indices with their conditions in a single pass.
+     * Sequential replaceAll is intentionally avoided because condition strings
+     * themselves may contain digits that would be incorrectly re-replaced.
+     *
+     * Example: "1 AND (2 OR 3)" with {1: "A=1", 2: "B>2", 3: "C<3"}
+     *          → "A=1 AND (B>2 OR C<3)"
      */
     private static String applyFilterLogic(String logic, Map<Integer, String> conditions) {
-        if (String.isBlank(logic)) {
-            return '';
+        if (String.isBlank(logic)) return '';
+
+        String upper = logic.toUpperCase().trim();
+        String result = '';
+        Integer i = 0;
+        Integer len = upper.length();
+
+        while (i < len) {
+            String ch = upper.substring(i, i + 1);
+
+            if ('0123456789'.contains(ch)) {
+                // Consume the full number
+                Integer start = i;
+                while (i < len && '0123456789'.contains(upper.substring(i, i + 1))) {
+                    i++;
+                }
+                Integer idx = Integer.valueOf(upper.substring(start, i));
+                result += conditions.containsKey(idx) ? conditions.get(idx) : String.valueOf(idx);
+
+            } else if (upper.startsWith('AND', i) && (i + 3 >= len || !isWordChar(upper, i + 3))) {
+                result += ' AND ';
+                i += 3;
+            } else if (upper.startsWith('OR', i) && (i + 2 >= len || !isWordChar(upper, i + 2))) {
+                result += ' OR ';
+                i += 2;
+            } else if (upper.startsWith('NOT', i) && (i + 3 >= len || !isWordChar(upper, i + 3))) {
+                result += ' NOT ';
+                i += 3;
+            } else if (ch == '(' || ch == ')') {
+                result += ch;
+                i++;
+            } else {
+                // Space or unexpected char — skip
+                i++;
+            }
         }
-        
-        String result = logic;
-        
-        // Replace each criterion number with its condition
-        for (Integer key : conditions.keySet()) {
-            String condition = conditions.get(key);
-            // Use word boundaries to avoid replacing numbers within other numbers
-            result = result.replaceAll('\\b' + key + '\\b', condition);
-        }
-        
-        return result;
+
+        // Normalize whitespace
+        return result.trim().replaceAll('\\s{2,}', ' ');
+    }
+
+    private static Boolean isWordChar(String str, Integer pos) {
+        if (pos >= str.length()) return false;
+        String ch = str.substring(pos, pos + 1);
+        return ch.isAlpha() || ch.isNumeric() || ch == '_';
     }
 
     /**
