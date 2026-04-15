@@ -64,16 +64,18 @@ public with sharing class CustomRecordPickerSearchController {
         // Build SOSL query
         String soslQuery = buildSoslQuery(request);
         
-        // If we have additional SOQL filters, we need to apply them post-search
-        // because SOSL doesn't support WHERE clauses directly
+        // Execute SOSL search
         List<List<SObject>> soslResultGroups = Search.query(soslQuery);
         List<SObject> soslResults = new List<SObject>();
         for (List<SObject> resultGroup : soslResultGroups) {
             soslResults.addAll(resultGroup);
         }
         
-        // Apply SOQL-like filters to SOSL results
-        List<SObject> filteredResults = applyFilters(soslResults, request);
+        // Get criteria that couldn't be included in SOSL WHERE clause
+        List<FilterCriterion> postProcessCriteria = getPostProcessCriteria(request.criteria);
+        
+        // Apply remaining filters post-search if any
+        List<SObject> filteredResults = applyFilters(soslResults, postProcessCriteria, request.filterLogic);
         
         // Cap results
         Integer resultLimit = Math.min(request.maxResults != null ? request.maxResults : 10, MAX_RESULTS_CAP);
@@ -134,22 +136,21 @@ public with sharing class CustomRecordPickerSearchController {
     }
 
     /**
-     * Builds a dynamic SOSL query string with WHERE clauses for searchFields
+     * Builds a dynamic SOSL query string with WHERE clauses for searchFields and criteria
      * 
      * Format: FIND {searchTerm} IN ALL FIELDS RETURNING ObjectName(
-     *   fields WHERE field1 LIKE '%term%' OR field2 LIKE '%term%' ...
+     *   fields WHERE (searchConditions) AND (filterConditions)
      * )
      * 
      * Strategy:
      *   1. FIND uses * wildcard for fast index-based prefix search
-     *   2. WHERE clauses further refine results on specific searchFields using LIKE
-     *   3. Additional filter criteria are applied post-search
+     *   2. WHERE combines search field LIKE conditions with filter criteria
+     *   3. Complex filters that can't be expressed in SOSL are applied post-search
      */
     private static String buildSoslQuery(SearchRequest request) {
         String searchTerm = sanitizeSoslTerm(request.searchTerm);
         
         // For FIND: use prefix wildcard (fast index search)
-        // E.g., "dupont" → "dupont*" matches "Dupont SA", "Dupontier", etc.
         String soslTerm = searchTerm + '*';
         
         // Build field list (SOSL includes Id by default)
@@ -174,13 +175,12 @@ public with sharing class CustomRecordPickerSearchController {
             }
         }
         
-        // Build WHERE clause for searchFields (using LIKE for substring matching)
-        // E.g.: WHERE Name LIKE '%dupont%' OR SIRETnumber__c LIKE '%dupont%'
-        String whereClause = '';
+        // Build WHERE conditions
+        List<String> whereConditions = new List<String>();
+        
+        // Add search field LIKE conditions
         if (request.searchFields != null && !request.searchFields.isEmpty()) {
             List<String> searchConditions = new List<String>();
-            // For LIKE: use both wildcards for substring matching
-            // E.g., "dupont" → "%dupont%"
             String likeSearchTerm = '%' + sanitizeLikeTerm(request.searchTerm) + '%';
             
             for (String field : request.searchFields) {
@@ -188,8 +188,24 @@ public with sharing class CustomRecordPickerSearchController {
             }
             
             if (!searchConditions.isEmpty()) {
-                whereClause = ' WHERE ' + String.join(searchConditions, ' OR ');
+                whereConditions.add('(' + String.join(searchConditions, ' OR ') + ')');
             }
+        }
+        
+        // Add filter criteria that can be expressed in SOSL WHERE
+        if (request.criteria != null && !request.criteria.isEmpty()) {
+            for (FilterCriterion criterion : request.criteria) {
+                String soslCondition = buildSoslCondition(criterion);
+                if (soslCondition != null) {
+                    whereConditions.add(soslCondition);
+                }
+            }
+        }
+        
+        // Combine all WHERE conditions with AND
+        String whereClause = '';
+        if (!whereConditions.isEmpty()) {
+            whereClause = ' WHERE ' + String.join(whereConditions, ' AND ');
         }
         
         // Build the SOSL query
@@ -202,19 +218,151 @@ public with sharing class CustomRecordPickerSearchController {
     }
 
     /**
-     * Applies SOQL-like filters to SOSL results
-     * Since SOSL doesn't support WHERE clauses in standard Apex SOSL syntax,
-     * we filter the results in memory
+     * Builds a SOSL WHERE condition for a filter criterion
+     * Returns null if the criterion cannot be expressed in SOSL
      */
-    private static List<SObject> applyFilters(List<SObject> results, SearchRequest request) {
-        if (request.criteria == null || request.criteria.isEmpty()) {
+    private static String buildSoslCondition(FilterCriterion criterion) {
+        String field = criterion.fieldPath;
+        String operator = criterion.operator.toLowerCase();
+        Object value = criterion.value;
+        
+        String soslOperator;
+        String soslValue;
+        
+        switch on operator {
+            when 'eq' {
+                soslOperator = '=';
+                soslValue = formatSoslValue(value, criterion.dataType);
+            }
+            when 'ne' {
+                soslOperator = '!=';
+                soslValue = formatSoslValue(value, criterion.dataType);
+            }
+            when 'like' {
+                soslOperator = 'LIKE';
+                soslValue = formatSoslValue(value, criterion.dataType);
+            }
+            when 'gt' {
+                soslOperator = '>';
+                soslValue = formatSoslValue(value, criterion.dataType);
+            }
+            when 'gte' {
+                soslOperator = '>=';
+                soslValue = formatSoslValue(value, criterion.dataType);
+            }
+            when 'lt' {
+                soslOperator = '<';
+                soslValue = formatSoslValue(value, criterion.dataType);
+            }
+            when 'lte' {
+                soslOperator = '<=';
+                soslValue = formatSoslValue(value, criterion.dataType);
+            }
+            when 'in' {
+                soslOperator = 'IN';
+                soslValue = formatSoslInValue(value, criterion.dataType);
+            }
+            when 'nin' {
+                soslOperator = 'NOT IN';
+                soslValue = formatSoslInValue(value, criterion.dataType);
+            }
+            when else {
+                return null; // Cannot express in SOSL
+            }
+        }
+        
+        if (soslValue == null) {
+            return null; // Cannot format value
+        }
+        
+        return field + ' ' + soslOperator + ' ' + soslValue;
+    }
+
+    /**
+     * Formats a value for SOSL WHERE clause
+     */
+    private static String formatSoslValue(Object value, String dataType) {
+        if (value == null) return null;
+        
+        // Handle date literals
+        if (dataType != null && dataType.toLowerCase().contains('date')) {
+            if (value instanceof Map<String, Object>) {
+                Map<String, Object> valueMap = (Map<String, Object>)value;
+                if (valueMap.containsKey('literal')) {
+                    return (String)valueMap.get('literal');
+                }
+            }
+            // For direct DateTime values, we can't easily format them for SOSL
+            // So return null to force post-processing
+            return null;
+        }
+        
+        // Handle strings
+        if (value instanceof String) {
+            return '\'' + String.valueOf(value).replace('\'', '\\\'') + '\'';
+        }
+        
+        // Handle numbers and booleans
+        return String.valueOf(value);
+    }
+
+    /**
+     * Formats a value for SOSL IN/NOT IN clause
+     */
+    private static String formatSoslInValue(Object value, String dataType) {
+        if (value == null) return null;
+        
+        if (value instanceof List<Object>) {
+            List<Object> values = (List<Object>)value;
+            List<String> formattedValues = new List<String>();
+            
+            for (Object val : values) {
+                String formatted = formatSoslValue(val, dataType);
+                if (formatted != null) {
+                    formattedValues.add(formatted);
+                } else {
+                    return null; // If any value can't be formatted, skip the condition
+                }
+            }
+            
+            return '(' + String.join(formattedValues, ', ') + ')';
+        }
+        
+        return null;
+    }
+
+    /**
+     * Gets criteria that cannot be expressed in SOSL WHERE clause
+     * These will be applied post-search
+     */
+    private static List<FilterCriterion> getPostProcessCriteria(List<FilterCriterion> allCriteria) {
+        if (allCriteria == null || allCriteria.isEmpty()) {
+            return new List<FilterCriterion>();
+        }
+        
+        List<FilterCriterion> postProcessCriteria = new List<FilterCriterion>();
+        
+        for (FilterCriterion criterion : allCriteria) {
+            if (buildSoslCondition(criterion) == null) {
+                postProcessCriteria.add(criterion);
+            }
+        }
+        
+        return postProcessCriteria;
+    }
+
+    /**
+     * Applies SOQL-like filters to SOSL results for criteria that couldn't be included in SOSL WHERE
+     */
+    private static List<SObject> applyFilters(List<SObject> results, List<FilterCriterion> criteria, String filterLogic) {
+        if (criteria == null || criteria.isEmpty()) {
             return results;
         }
         
         List<SObject> filtered = new List<SObject>();
         
         for (SObject record : results) {
-            if (evaluateFilters(record, request.criteria, request.filterLogic)) {
+            if (evaluateFilters(record, criteria, filterLogic)) {
                 filtered.add(record);
             }
         }
@@ -341,6 +489,15 @@ public with sharing class CustomRecordPickerSearchController {
         // Add more literals as needed
         return null;
     }
+
+    /**
+     * Gets a field value from an SObject, supporting dot notation for related fields
+     */
+    private static Object getFieldValue(SObject record, String fieldPath) {
+        if (record == null || String.isBlank(fieldPath)) {
+            return null;
+        }
+        
         String[] parts = fieldPath.split('\\.');
         Object current = record;
         

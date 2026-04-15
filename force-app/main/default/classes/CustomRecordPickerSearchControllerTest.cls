@@ -199,6 +199,40 @@ public class CustomRecordPickerSearchControllerTest {
     }
 
     @isTest
+    static void testDateLiteralInSoslWhere() {
+        // Create an account with today's date
+        Account testAccount = new Account(
+            Name = 'TodayTestAccount',
+            Industry = 'Test',
+            Type = 'Prospect'
+        );
+        insert testAccount;
+
+        CustomRecordPickerSearchController.SearchRequest request = new CustomRecordPickerSearchController.SearchRequest();
+        request.searchTerm = 'TodayTestAccount';
+        request.objectApiName = 'Account';
+        request.searchFields = new List<String>{'Name'};
+        request.maxResults = 10;
+
+        // Add a date criterion using TODAY literal
+        CustomRecordPickerSearchController.FilterCriterion dateCriterion = new CustomRecordPickerSearchController.FilterCriterion();
+        dateCriterion.fieldPath = 'CreatedDate';
+        dateCriterion.operator = 'eq';
+        dateCriterion.value = new Map<String, Object>{'literal' => 'TODAY'};
+        dateCriterion.dataType = 'DateTime';
+
+        request.criteria = new List<CustomRecordPickerSearchController.FilterCriterion>{dateCriterion};
+
+        Test.startTest();
+        List<CustomRecordPickerSearchController.SearchResult> results = CustomRecordPickerSearchController.search(request);
+        Test.stopTest();
+
+        // Should find the account created today using SOSL WHERE with TODAY literal
+        Assert.isTrue(results.size() > 0, 'Should find account using TODAY literal in SOSL WHERE');
+        Assert.areEqual(testAccount.Id, results[0].id, 'Should return the correct account');
+    }
+
+    @isTest
     static void testSoslWhereLikeWithPrefixWildcard() {
         // This test demonstrates the FIND * + WHERE LIKE %% strategy
         // FIND 'dupont*' (prefix wildcard for index)

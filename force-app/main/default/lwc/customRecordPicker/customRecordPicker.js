@@ -350,7 +350,7 @@ export default class CustomRecordPicker extends OmniscriptBaseMixin(
     @api useFlow = false;
     @api outputKey = "selectedRecord";
 
-    _config = /*{
+    _config = {
     "label": "Test tous les opérateurs",
     "objectApiName": "Account",
     "titleField": "Name",
@@ -379,8 +379,8 @@ export default class CustomRecordPicker extends OmniscriptBaseMixin(
     },
     "maxResults": 50,
     "minimumSearchLength": 2
-}*/
-{
+}
+/*{
    "label":"Tiers payeurs",
    "objectApiName":"Account",
    "titleField":"Name",
@@ -445,7 +445,7 @@ export default class CustomRecordPicker extends OmniscriptBaseMixin(
    "required":true,
    "maxResults":30,
    "minimumSearchLength":2
-}
+}*/
     _value;
 
     @api
