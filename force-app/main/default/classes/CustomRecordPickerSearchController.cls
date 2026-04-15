@@ -44,6 +44,9 @@ public with sharing class CustomRecordPickerSearchController {
     }
 
     private static final Integer MAX_RESULTS_CAP = 100;
+    private static final Set<String> ALLOWED_OPERATORS = new Set<String>{
+        'eq', 'ne', 'like', 'gt', 'gte', 'lt', 'lte', 'in', 'nin'
+    };
 
     /**
      * Executes a dynamic SOSL search with filtering
@@ -121,6 +124,9 @@ public with sharing class CustomRecordPickerSearchController {
                 FilterCriterion criterion = request.criteria.get(i);
                 if (!isValidFieldPath(criterion.fieldPath)) {
                     throw new IllegalArgumentException('Invalid filter field path: ' + criterion.fieldPath);
+                }
+                if (!ALLOWED_OPERATORS.contains(criterion.operator.toLowerCase())) {
+                    throw new IllegalArgumentException('Invalid operator: ' + criterion.operator);
                 }
             }
         }
