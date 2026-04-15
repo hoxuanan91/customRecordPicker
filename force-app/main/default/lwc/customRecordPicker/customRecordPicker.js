@@ -5,6 +5,7 @@ import { OmniscriptBaseMixin } from "vlocity_ins/omniscriptBaseMixin";
 
 // ✅ Import Apex method pour SOSL search
 import search from "@salesforce/apex/CustomRecordPickerSearchController.search";
+import { buildSoslQuery } from "./customRecordPickerUtils";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 const FIELD_PATH_REGEX =
@@ -55,11 +56,6 @@ function validateOperator(op) {
             `customRecordPicker: Unsupported filter operator "${op}".`,
         );
     }
-}
-
-// Escape SOSL reserved characters (keeps * so callers can append wildcard)
-function sanitizeSoslTerm(term) {
-    return term.replace(/[?&|!{}[\]()^~:\\"'+-]/g, "\\$&");
 }
 
 function parseLooseJsonString(raw) {
@@ -532,39 +528,16 @@ export default class CustomRecordPicker extends OmniscriptBaseMixin(
      * @param {string} term - the debounced search term (captured to detect stale results)
      */
     _executeApexSearch(term) {
-        // Collect all fields the template needs: display fields + search fields + filter fields
-        const filterCriteriaFields = (this._cfg.filter?.criteria || [])
-            .map((c) => c.fieldPath)
-            .filter((f) => f && !f.includes("."));
-
-        const returnFields = [
-            ...new Set([
-                ...this._allQueryApiNames,
-                ...this._searchApiNames,
-                ...filterCriteriaFields,
-            ]),
-        ].filter((f) => f !== "Id");
-
-        // Serialize each criterion value as JSON so Apex can deserialize it with
-        // JSON.deserializeUntyped() — guarantees correct typing (Boolean, Map for
-        // date literals, List for IN/NIN, etc.)
-        const criteria = (this._cfg.filter?.criteria || []).map((c) => ({
-            fieldPath: c.fieldPath,
-            operator: c.operator,
-            serializedValue: JSON.stringify(c.value !== undefined ? c.value : null),
-        }));
-
-        const request = {
-            searchTerm: sanitizeSoslTerm(term),
+        const soslQuery = buildSoslQuery({
+            searchTerm: term,
             objectApiName: this._cfg.objectApiName,
-            searchFields: this._searchApiNames,
-            returnFields,
+            searchApiNames: this._searchApiNames,
+            allQueryApiNames: this._allQueryApiNames,
+            filter: this._cfg.filter,
             maxResults: this._cfg.maxResults,
-            criteria,
-            filterLogic: this._cfg.filter?.filterLogic || null,
-        };
+        });
 
-        search({ request })
+        search({ request: { soslQuery } })
             .then((results) => {
                 // Discard if the user has already typed something else
                 if (this._searchTerm !== term) return;

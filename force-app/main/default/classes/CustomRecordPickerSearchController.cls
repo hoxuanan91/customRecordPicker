@@ -1,542 +1,62 @@
 /**
  * CustomRecordPickerSearchController
- * 
- * Provides dynamic SOSL search functionality for the CustomRecordPicker LWC component.
- * SOSL is more powerful than SOQL for text search:
- * - Full-text search across multiple fields simultaneously
- * - Better substring/prefix matching capabilities
- * - Index-based performance optimization
+ *
+ * Executes a pre-built SOSL query string sent by the LWC component.
+ * Query construction (field list, WHERE clause, filter logic) is done
+ * entirely in JS (customRecordPickerUtils.buildSoslQuery) to keep value
+ * formatting simple and avoid Apex deserialization edge cases.
  */
 public with sharing class CustomRecordPickerSearchController {
 
-    /**
-     * Represents a search request from the LWC component
-     */
+    /** Search request — just the pre-built SOSL string from JS. */
     public class SearchRequest {
-        @AuraEnabled public String searchTerm { get; set; }
-        @AuraEnabled public String objectApiName { get; set; }
-        @AuraEnabled public List<String> searchFields { get; set; }
-        @AuraEnabled public List<String> returnFields { get; set; }
-        @AuraEnabled public Integer maxResults { get; set; }
-        @AuraEnabled public List<FilterCriterion> criteria { get; set; }
-        @AuraEnabled public String filterLogic { get; set; }
+        @AuraEnabled public String soslQuery { get; set; }
     }
 
-    /**
-     * Represents a single filter criterion.
-     * value is JSON-serialized as a String to guarantee correct Apex deserialization
-     * for all types (Boolean, String, Number, Date literal objects, Lists).
-     */
-    public class FilterCriterion {
-        @AuraEnabled public String fieldPath { get; set; }
-        @AuraEnabled public String operator { get; set; }
-        @AuraEnabled public String serializedValue { get; set; }
-    }
-
-    /**
-     * Represents a search result with all requested fields
-     */
+    /** Search result returned to the LWC component. */
     public class SearchResult {
         @AuraEnabled public String id;
         @AuraEnabled public Map<String, Object> fields;
-        
+
         public SearchResult(String id, Map<String, Object> fields) {
             this.id = id;
             this.fields = fields;
         }
     }
 
-    private static final Integer MAX_RESULTS_CAP = 100;
-    private static final Set<String> ALLOWED_OPERATORS = new Set<String>{
-        'eq', 'ne', 'like', 'gt', 'gte', 'lt', 'lte', 'in', 'nin'
-    };
-
     /**
-     * Executes a dynamic SOSL search with filtering
-     * 
-     * @param request The search request containing search term, object name, fields, and filters
-     * @return List of SearchResult objects matching the criteria
-     * @throws IllegalArgumentException if the request parameters are invalid
+     * Executes the SOSL query built by the LWC component and returns matching records.
+     *
+     * @param request  Contains the pre-built soslQuery string
+     * @return         List of SearchResult objects
      */
     @AuraEnabled(cacheable=false)
     public static List<SearchResult> search(SearchRequest request) {
-        // Validate request
-        validateSearchRequest(request);
+        if (request == null || String.isBlank(request.soslQuery)) {
+            throw new IllegalArgumentException('soslQuery is required');
+        }
+        // Basic structural guard: must start with FIND '
+        if (!request.soslQuery.trim().toUpperCase().startsWith('FIND \'')) {
+            throw new IllegalArgumentException('Invalid SOSL query format');
+        }
 
-        // Build SOSL query
-        String soslQuery = buildSoslQuery(request);
-        
         try {
-            // Execute SOSL search
-            List<List<SObject>> soslResultGroups = Search.query(soslQuery);
-            List<SObject> soslResults = new List<SObject>();
-            for (List<SObject> resultGroup : soslResultGroups) {
-                soslResults.addAll(resultGroup);
+            List<List<SObject>> resultGroups = Search.query(request.soslQuery);
+            List<SObject> records = new List<SObject>();
+            for (List<SObject> group : resultGroups) {
+                records.addAll(group);
             }
-            
-            // Cap results
-            Integer resultLimit = Math.min(request.maxResults != null ? request.maxResults : 10, MAX_RESULTS_CAP);
-            if (soslResults.size() > resultLimit) {
-                List<SObject> limitedResults = new List<SObject>();
-                for (Integer i = 0; i < resultLimit; i++) {
-                    limitedResults.add(soslResults.get(i));
-                }
-                soslResults = limitedResults;
-            }
-            
-            // Convert to SearchResult objects with all requested fields
-            return convertToSearchResults(soslResults, request.objectApiName);
+            return convertToSearchResults(records);
         } catch (Exception e) {
-            throw new IllegalArgumentException('SOSL query execution failed: ' + e.getMessage() + '. Query: ' + soslQuery);
+            throw new IllegalArgumentException('SOSL query execution failed: ' + e.getMessage() + '. Query: ' + request.soslQuery);
         }
     }
 
-    /**
-     * Validates the search request parameters
-     */
-    private static void validateSearchRequest(SearchRequest request) {
-        if (request == null) {
-            throw new IllegalArgumentException('Search request cannot be null');
-        }
-        
-        if (String.isBlank(request.objectApiName)) {
-            throw new IllegalArgumentException('objectApiName is required');
-        }
-        
-        if (String.isBlank(request.searchTerm)) {
-            throw new IllegalArgumentException('searchTerm is required');
-        }
-        
-        // Validate object name
-        if (!isValidObjectName(request.objectApiName)) {
-            throw new IllegalArgumentException('Invalid objectApiName: ' + request.objectApiName);
-        }
-        
-        // Validate search fields if provided
-        if (request.searchFields != null && !request.searchFields.isEmpty()) {
-            for (String field : request.searchFields) {
-                if (!isValidFieldPath(field)) {
-                    throw new IllegalArgumentException('Invalid search field: ' + field);
-                }
-            }
-        }
-        
-        // Validate filter criteria if provided
-        if (request.criteria != null && !request.criteria.isEmpty()) {
-            for (Integer i = 0; i < request.criteria.size(); i++) {
-                FilterCriterion criterion = request.criteria.get(i);
-                if (!isValidFieldPath(criterion.fieldPath)) {
-                    throw new IllegalArgumentException('Invalid filter field path: ' + criterion.fieldPath);
-                }
-                if (!ALLOWED_OPERATORS.contains(criterion.operator.toLowerCase())) {
-                    throw new IllegalArgumentException('Invalid operator: ' + criterion.operator);
-                }
-            }
-        }
-    }
-
-    /**
-     * Builds a dynamic SOSL query string with WHERE clauses for searchFields and criteria
-     * 
-     * Format: FIND {searchTerm} IN ALL FIELDS RETURNING ObjectName(
-     *   fields WHERE (searchConditions) AND (filterConditions)
-     * )
-     * 
-     * Strategy:
-     *   1. FIND uses * wildcard for fast index-based prefix search
-     *   2. WHERE combines search field LIKE conditions with filter criteria
-     *   3. Complex filters that can't be expressed in SOSL are applied post-search
-     */
-    private static String buildSoslQuery(SearchRequest request) {
-        String searchTerm = sanitizeSoslTerm(request.searchTerm);
-        
-        // For FIND: use prefix wildcard (fast index search)
-        String soslTerm = searchTerm + '*';
-        
-        // Build field list — Id is always included
-        Set<String> allFieldsSet = new Set<String>{'Id'};
-
-        // Add explicitly requested return fields (title, subtitles, discriminator, etc.)
-        if (request.returnFields != null) {
-            allFieldsSet.addAll(request.returnFields);
-        }
-
-        // Add search fields so they are available in the WHERE clause
-        if (request.searchFields != null) {
-            allFieldsSet.addAll(request.searchFields);
-        }
-
-        // Add filter criterion fields so they are available in the WHERE clause
-        if (request.criteria != null) {
-            for (FilterCriterion criterion : request.criteria) {
-                if (String.isNotBlank(criterion.fieldPath)) {
-                    allFieldsSet.add(criterion.fieldPath.split('\\.')[0]);
-                }
-            }
-        }
-
-        List<String> allFields = new List<String>(allFieldsSet);
-        
-        // Build WHERE conditions
-        List<String> whereConditions = new List<String>();
-        
-        // Add search field LIKE conditions
-        if (request.searchFields != null && !request.searchFields.isEmpty()) {
-            List<String> searchConditions = new List<String>();
-            String likeSearchTerm = '%' + sanitizeLikeTerm(request.searchTerm) + '%';
-            
-            for (String field : request.searchFields) {
-                searchConditions.add(field + ' LIKE \'' + likeSearchTerm + '\'');
-            }
-            
-            if (!searchConditions.isEmpty()) {
-                whereConditions.add('(' + String.join(searchConditions, ' OR ') + ')');
-            }
-        }
-        
-        // Add filter criteria with proper logic
-        String filterWhereClause = '';
-        if (request.criteria != null && !request.criteria.isEmpty()) {
-            // Build indexed conditions map
-            Map<Integer, String> indexedConditions = new Map<Integer, String>();
-            for (Integer i = 0; i < request.criteria.size(); i++) {
-                String soslCondition = buildSoslCondition(request.criteria.get(i));
-                indexedConditions.put(i + 1, soslCondition);
-            }
-            
-            // Apply filter logic
-            if (String.isNotBlank(request.filterLogic)) {
-                filterWhereClause = applyFilterLogic(request.filterLogic, indexedConditions);
-            } else {
-                // Default to AND logic if no filterLogic provided
-                List<String> conditions = indexedConditions.values();
-                filterWhereClause = String.join(conditions, ' AND ');
-            }
-            
-            if (String.isNotBlank(filterWhereClause)) {
-                whereConditions.add('(' + filterWhereClause + ')');
-            }
-        }
-        
-        // Combine all WHERE conditions with AND
-        String whereClause = '';
-        if (!whereConditions.isEmpty()) {
-            whereClause = ' WHERE ' + String.join(whereConditions, ' AND ');
-        }
-        
-        // Build the SOSL query
-        Integer resultLimit = Math.min(request.maxResults != null ? request.maxResults : 10, MAX_RESULTS_CAP);
-        String query = 'FIND \'' + soslTerm + '\' IN ALL FIELDS RETURNING ' +
-                       request.objectApiName + '(' + String.join(allFields, ', ') + 
-                       whereClause + ' LIMIT ' + resultLimit + ')';
-        
-        return query;
-    }
-
-    /**
-     * Builds a SOSL WHERE condition for a filter criterion.
-     * serializedValue is JSON-deserialized here so that all types
-     * (Boolean, Decimal, String, List, Map for date literals) are
-     * correctly typed regardless of how @AuraEnabled deserialized the param.
-     */
-    private static String buildSoslCondition(FilterCriterion criterion) {
-        String field = criterion.fieldPath;
-        String operator = criterion.operator.toLowerCase();
-        Object value;
-        try {
-            value = String.isBlank(criterion.serializedValue)
-                ? null
-                : JSON.deserializeUntyped(criterion.serializedValue);
-        } catch (Exception e) {
-            value = criterion.serializedValue;
-        }
-        
-        String soslOperator;
-        String soslValue;
-        
-        switch on operator {
-            when 'eq' {
-                soslOperator = '=';
-                soslValue = formatSoslValue(value);
-            }
-            when 'ne' {
-                soslOperator = '!=';
-                soslValue = formatSoslValue(value);
-            }
-            when 'like' {
-                soslOperator = 'LIKE';
-                soslValue = formatSoslValue(value);
-            }
-            when 'gt' {
-                soslOperator = '>';
-                soslValue = formatSoslValue(value);
-            }
-            when 'gte' {
-                soslOperator = '>=';
-                soslValue = formatSoslValue(value);
-            }
-            when 'lt' {
-                soslOperator = '<';
-                soslValue = formatSoslValue(value);
-            }
-            when 'lte' {
-                soslOperator = '<=';
-                soslValue = formatSoslValue(value);
-            }
-            when 'in' {
-                soslOperator = 'IN';
-                soslValue = formatSoslInValue(value);
-            }
-            when 'nin' {
-                soslOperator = 'NOT IN';
-                soslValue = formatSoslInValue(value);
-            }
-            when else {
-                throw new IllegalArgumentException('Unsupported operator: ' + operator);
-            }
-        }
-        
-        return field + ' ' + soslOperator + ' ' + soslValue;
-    }
-
-    /**
-     * Applies filter logic by tokenizing the original logic string and substituting
-     * criterion indices with their conditions in a single pass.
-     * Sequential replaceAll is intentionally avoided because condition strings
-     * themselves may contain digits that would be incorrectly re-replaced.
-     *
-     * Example: "1 AND (2 OR 3)" with {1: "A=1", 2: "B>2", 3: "C<3"}
-     *          → "A=1 AND (B>2 OR C<3)"
-     */
-    private static String applyFilterLogic(String logic, Map<Integer, String> conditions) {
-        if (String.isBlank(logic)) return '';
-
-        String upper = logic.toUpperCase().trim();
-        String result = '';
-        Integer i = 0;
-        Integer len = upper.length();
-
-        while (i < len) {
-            String ch = upper.substring(i, i + 1);
-
-            if ('0123456789'.contains(ch)) {
-                // Consume the full number
-                Integer start = i;
-                while (i < len && '0123456789'.contains(upper.substring(i, i + 1))) {
-                    i++;
-                }
-                Integer idx = Integer.valueOf(upper.substring(start, i));
-                result += conditions.containsKey(idx) ? conditions.get(idx) : String.valueOf(idx);
-
-            } else if (i + 3 <= len && upper.substring(i, i + 3) == 'AND' && (i + 3 >= len || !isWordChar(upper, i + 3))) {
-                result += ' AND ';
-                i += 3;
-            } else if (i + 2 <= len && upper.substring(i, i + 2) == 'OR' && (i + 2 >= len || !isWordChar(upper, i + 2))) {
-                result += ' OR ';
-                i += 2;
-            } else if (i + 3 <= len && upper.substring(i, i + 3) == 'NOT' && (i + 3 >= len || !isWordChar(upper, i + 3))) {
-                result += ' NOT ';
-                i += 3;
-            } else if (ch == '(' || ch == ')') {
-                result += ch;
-                i++;
-            } else {
-                // Space or unexpected char — skip
-                i++;
-            }
-        }
-
-        // Normalize whitespace
-        return result.trim().replaceAll('\\s{2,}', ' ');
-    }
-
-    private static Boolean isWordChar(String str, Integer pos) {
-        if (pos >= str.length()) return false;
-        String ch = str.substring(pos, pos + 1);
-        return ch.isAlpha() || ch.isNumeric() || ch == '_';
-    }
-
-    /**
-     * Formats a value for SOSL WHERE clause
-     */
-    private static String formatSoslValue(Object value) {
-        if (value == null) {
-            return 'null';
-        }
-        
-        // Handle date literals
-        if (value instanceof Map<String, Object>) {
-            Map<String, Object> valueMap = (Map<String, Object>)value;
-            if (valueMap.containsKey('literal')) {
-                Object literalValue = valueMap.get('literal');
-                if (literalValue instanceof String) {
-                    return (String)literalValue;
-                }
-            }
-        }
-        
-        // Handle strings
-        if (value instanceof String) {
-            return '\'' + String.valueOf(value).replace('\'', '\\\'') + '\'';
-        }
-        
-        // Handle numbers and booleans
-        return String.valueOf(value);
-    }
-
-    /**
-     * Formats a value for SOSL IN/NOT IN clause
-     */
-    private static String formatSoslInValue(Object value) {
-        if (value == null) {
-            return '(null)';
-        }
-        
-        if (value instanceof List<Object>) {
-            List<Object> values = (List<Object>)value;
-            List<String> formattedValues = new List<String>();
-            
-            for (Object val : values) {
-                formattedValues.add(formatSoslValue(val));
-            }
-            
-            return '(' + String.join(formattedValues, ', ') + ')';
-        }
-        
-        return '(' + formatSoslValue(value) + ')';
-    }
-
-
-
-    /**
-     * Converts SObject results to SearchResult objects
-     */
-    private static List<SearchResult> convertToSearchResults(List<SObject> records, String objectApiName) {
+    private static List<SearchResult> convertToSearchResults(List<SObject> records) {
         List<SearchResult> results = new List<SearchResult>();
-        
         for (SObject record : records) {
-            String id = (String)record.get('Id');
-            Map<String, Object> fields = record.getPopulatedFieldsAsMap();
-            results.add(new SearchResult(id, fields));
+            results.add(new SearchResult((String) record.get('Id'), record.getPopulatedFieldsAsMap()));
         }
-        
         return results;
-    }
-
-    /**
-     * Sanitizes SOSL search terms (escapes special characters)
-     * Keeps SOSL special chars that have meaning in FIND
-     */
-    private static String sanitizeSoslTerm(String term) {
-        if (String.isBlank(term)) {
-            return '';
-        }
-        
-        // Escape SOSL special characters: ? & | ! { } [ ] ( ) ^ ~ : \ " '  + -
-        String sanitized = term;
-        sanitized = sanitized.replace('\\', '\\\\');
-        sanitized = sanitized.replace('?', '\\?');
-        sanitized = sanitized.replace('&', '\\&');
-        sanitized = sanitized.replace('|', '\\|');
-        sanitized = sanitized.replace('!', '\\!');
-        sanitized = sanitized.replace('{', '\\{');
-        sanitized = sanitized.replace('}', '\\}');
-        sanitized = sanitized.replace('[', '\\[');
-        sanitized = sanitized.replace(']', '\\]');
-        sanitized = sanitized.replace('(', '\\(');
-        sanitized = sanitized.replace(')', '\\)');
-        sanitized = sanitized.replace('^', '\\^');
-        sanitized = sanitized.replace('~', '\\~');
-        sanitized = sanitized.replace(':', '\\:');
-        sanitized = sanitized.replace('"', '\\"');
-        sanitized = sanitized.replace('\'', '\\\'');
-        sanitized = sanitized.replace('+', '\\+');
-        sanitized = sanitized.replace('-', '\\-');
-        
-        return sanitized;
-    }
-
-    /**
-     * Sanitizes LIKE search terms (escapes SQL LIKE special characters)
-     * % = wildcard (any chars), _ = single char → must be escaped if literal
-     */
-    private static String sanitizeLikeTerm(String term) {
-        if (String.isBlank(term)) {
-            return '';
-        }
-        
-        String sanitized = term;
-        // Escape LIKE wildcard characters
-        sanitized = sanitized.replace('\\', '\\\\');
-        sanitized = sanitized.replace('%', '\\%');
-        sanitized = sanitized.replace('_', '\\_');
-        
-        return sanitized;
-    }
-
-    /**
-     * Validates a field path (simple vs nested fields)
-     */
-    private static Boolean isValidFieldPath(String fieldPath) {
-        if (String.isBlank(fieldPath)) {
-            return false;
-        }
-        
-        String[] parts = fieldPath.split('\\.');
-        for (String part : parts) {
-            if (!isValidFieldName(part)) {
-                return false;
-            }
-        }
-        
-        return true;
-    }
-
-    /**
-     * Validates an individual field name
-     */
-    private static Boolean isValidFieldName(String fieldName) {
-        if (String.isBlank(fieldName)) {
-            return false;
-        }
-        
-        if (fieldName.length() == 0) {
-            return false;
-        }
-        String firstChar = fieldName.substring(0, 1);
-        Boolean validFirst = (firstChar >= 'A' && firstChar <= 'Z') ||
-                             (firstChar >= 'a' && firstChar <= 'z') ||
-                             (firstChar == '_');
-        if (!validFirst) {
-            return false;
-        }
-        for (Integer i = 1; i < fieldName.length(); i++) {
-            String ch = fieldName.substring(i, i + 1);
-            Boolean validChar = (ch >= 'A' && ch <= 'Z') ||
-                                (ch >= 'a' && ch <= 'z') ||
-                                (ch >= '0' && ch <= '9') ||
-                                (ch == '_');
-            if (!validChar) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    /**
-     * Validates an object API name
-     */
-    private static Boolean isValidObjectName(String objectName) {
-        if (String.isBlank(objectName)) {
-            return false;
-        }
-        
-        // Object names follow similar rules as field names, with optional __c or __e suffix
-        String lowerName = objectName.toLowerCase();
-        if (lowerName.endsWith('__c') || lowerName.endsWith('__e')) {
-            String baseName = objectName.substring(0, objectName.length() - 3);
-            return isValidFieldName(baseName);
-        }
-        return isValidFieldName(objectName);
     }
 }
