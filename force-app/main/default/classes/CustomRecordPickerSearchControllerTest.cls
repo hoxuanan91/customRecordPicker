@@ -62,13 +62,11 @@ public class CustomRecordPickerSearchControllerTest {
         criterion1.fieldPath = 'Industry';
         criterion1.operator = 'eq';
         criterion1.value = 'Technology';
-        criterion1.dataType = 'Picklist';
 
         CustomRecordPickerSearchController.FilterCriterion criterion2 = new CustomRecordPickerSearchController.FilterCriterion();
         criterion2.fieldPath = 'Type';
         criterion2.operator = 'eq';
         criterion2.value = 'Customer';
-        criterion2.dataType = 'Picklist';
 
         request.criteria = new List<CustomRecordPickerSearchController.FilterCriterion>{criterion1, criterion2};
         request.filterLogic = '1 AND 2';
@@ -91,13 +89,11 @@ public class CustomRecordPickerSearchControllerTest {
         criterion1.fieldPath = 'Type';
         criterion1.operator = 'eq';
         criterion1.value = 'Prospect';
-        criterion1.dataType = 'Picklist';
 
         CustomRecordPickerSearchController.FilterCriterion criterion2 = new CustomRecordPickerSearchController.FilterCriterion();
         criterion2.fieldPath = 'Type';
         criterion2.operator = 'eq';
         criterion2.value = 'Customer';
-        criterion2.dataType = 'Picklist';
 
         request.criteria = new List<CustomRecordPickerSearchController.FilterCriterion>{criterion1, criterion2};
         request.filterLogic = '1 OR 2';
@@ -219,7 +215,6 @@ public class CustomRecordPickerSearchControllerTest {
         dateCriterion.fieldPath = 'CreatedDate';
         dateCriterion.operator = 'eq';
         dateCriterion.value = new Map<String, Object>{'literal' => 'TODAY'};
-        dateCriterion.dataType = 'DateTime';
 
         request.criteria = new List<CustomRecordPickerSearchController.FilterCriterion>{dateCriterion};
 
@@ -258,7 +253,6 @@ public class CustomRecordPickerSearchControllerTest {
         nullCriterion.fieldPath = 'Industry';
         nullCriterion.operator = 'eq';
         nullCriterion.value = null;
-        nullCriterion.dataType = 'Picklist';
 
         request.criteria = new List<CustomRecordPickerSearchController.FilterCriterion>{nullCriterion};
 
@@ -307,7 +301,6 @@ public class CustomRecordPickerSearchControllerTest {
         criterion.fieldPath = 'Name';
         criterion.operator = 'like';
         criterion.value = '%Dupont%';
-        criterion.dataType = 'String';
 
         request.criteria = new List<CustomRecordPickerSearchController.FilterCriterion>{criterion};
         request.filterLogic = '1';
@@ -330,7 +323,6 @@ public class CustomRecordPickerSearchControllerTest {
         criterion.fieldPath = 'Type';
         criterion.operator = 'in';
         criterion.value = new List<Object>{'Customer', 'Prospect'};
-        criterion.dataType = '[Picklist]';
 
         request.criteria = new List<CustomRecordPickerSearchController.FilterCriterion>{criterion};
         request.filterLogic = '1';
@@ -353,7 +345,6 @@ public class CustomRecordPickerSearchControllerTest {
         criterion.fieldPath = 'Type';
         criterion.operator = 'nin';
         criterion.value = new List<Object>{'Other'};
-        criterion.dataType = '[Picklist]';
 
         request.criteria = new List<CustomRecordPickerSearchController.FilterCriterion>{criterion};
         request.filterLogic = '1';
@@ -376,19 +367,16 @@ public class CustomRecordPickerSearchControllerTest {
         criterion1.fieldPath = 'Type';
         criterion1.operator = 'eq';
         criterion1.value = 'Prospect';
-        criterion1.dataType = 'Picklist';
 
         CustomRecordPickerSearchController.FilterCriterion criterion2 = new CustomRecordPickerSearchController.FilterCriterion();
         criterion2.fieldPath = 'Industry';
         criterion2.operator = 'eq';
         criterion2.value = 'Technology';
-        criterion2.dataType = 'Picklist';
 
         CustomRecordPickerSearchController.FilterCriterion criterion3 = new CustomRecordPickerSearchController.FilterCriterion();
         criterion3.fieldPath = 'Type';
         criterion3.operator = 'ne';
         criterion3.value = 'Customer';
-        criterion3.dataType = 'Picklist';
 
         request.criteria = new List<CustomRecordPickerSearchController.FilterCriterion>{criterion1, criterion2, criterion3};
         request.filterLogic = '(1 OR 2) AND 3';
