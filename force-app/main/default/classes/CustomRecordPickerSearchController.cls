@@ -189,11 +189,27 @@ public with sharing class CustomRecordPickerSearchController {
             }
         }
         
-        // Add filter criteria - all criteria must be included in SOSL WHERE
+        // Add filter criteria with proper logic
+        String filterWhereClause = '';
         if (request.criteria != null && !request.criteria.isEmpty()) {
-            for (FilterCriterion criterion : request.criteria) {
-                String soslCondition = buildSoslCondition(criterion);
-                whereConditions.add(soslCondition);
+            // Build indexed conditions map
+            Map<Integer, String> indexedConditions = new Map<Integer, String>();
+            for (Integer i = 0; i < request.criteria.size(); i++) {
+                String soslCondition = buildSoslCondition(request.criteria.get(i));
+                indexedConditions.put(i + 1, soslCondition);
+            }
+            
+            // Apply filter logic
+            if (String.isNotBlank(request.filterLogic)) {
+                filterWhereClause = applyFilterLogic(request.filterLogic, indexedConditions);
+            } else {
+                // Default to AND logic if no filterLogic provided
+                List<String> conditions = indexedConditions.values();
+                filterWhereClause = String.join(conditions, ' AND ');
+            }
+            
+            if (String.isNotBlank(filterWhereClause)) {
+                whereConditions.add('(' + filterWhereClause + ')');
             }
         }
         
@@ -266,6 +282,26 @@ public with sharing class CustomRecordPickerSearchController {
         }
         
         return field + ' ' + soslOperator + ' ' + soslValue;
+    }
+
+    /**
+     * Applies filter logic by replacing criterion numbers with actual conditions
+     */
+    private static String applyFilterLogic(String logic, Map<Integer, String> conditions) {
+        if (String.isBlank(logic)) {
+            return '';
+        }
+        
+        String result = logic;
+        
+        // Replace each criterion number with its condition
+        for (Integer key : conditions.keySet()) {
+            String condition = conditions.get(key);
+            // Use word boundaries to avoid replacing numbers within other numbers
+            result = result.replaceAll('\\b' + key + '\\b', condition);
+        }
+        
+        return result;
     }
 
     /**
