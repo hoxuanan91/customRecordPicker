@@ -529,6 +529,19 @@ export default class CustomRecordPicker extends OmniscriptBaseMixin(
         return parts.length ? parts.join(" | ") : undefined;
     }
 
+    _buildFormattedSubtitle(node, profile) {
+        const subtitleFields =
+            profile?.subtitleFields || this._subtitleFieldsArray;
+        if (!subtitleFields.length) return undefined;
+        const parts = subtitleFields
+            .map((field) => {
+                const value = this._readNodeField(node, field.apiName);
+                return value ? `${field.fieldLabel} : ${value}` : null;
+            })
+            .filter(Boolean);
+        return parts.length ? parts.join(" | ") : undefined;
+    }
+
     // ─── APEX Search: SOSL with WHERE filters ────────────────────────────────
 
     /**
