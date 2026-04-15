@@ -280,7 +280,10 @@ public with sharing class CustomRecordPickerSearchController {
         if (value instanceof Map<String, Object>) {
             Map<String, Object> valueMap = (Map<String, Object>)value;
             if (valueMap.containsKey('literal')) {
-                return (String)valueMap.get('literal');
+                Object literalValue = valueMap.get('literal');
+                if (literalValue instanceof String) {
+                    return (String)literalValue;
+                }
             }
         }
         
