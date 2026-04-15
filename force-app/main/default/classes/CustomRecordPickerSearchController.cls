@@ -8,9 +8,10 @@
  */
 public with sharing class CustomRecordPickerSearchController {
 
-    /** Search request — just the pre-built SOSL string from JS. */
+    /** Search request — user input and developer-configured returning clause kept separate. */
     public class SearchRequest {
-        @AuraEnabled public String soslQuery { get; set; }
+        @AuraEnabled public String searchTerm { get; set; }
+        @AuraEnabled public String returningClause { get; set; }
     }
 
     /** Search result returned to the LWC component. */
@@ -27,28 +28,31 @@ public with sharing class CustomRecordPickerSearchController {
     /**
      * Executes the SOSL query built by the LWC component and returns matching records.
      *
-     * @param request  Contains the pre-built soslQuery string
+     * @param request  Contains searchTerm (user input) and returningClause (developer config)
      * @return         List of SearchResult objects
      */
     @AuraEnabled(cacheable=false)
     public static List<SearchResult> search(SearchRequest request) {
-        if (request == null || String.isBlank(request.soslQuery)) {
-            throw new IllegalArgumentException('soslQuery is required');
+        if (request == null || String.isBlank(request.searchTerm) || String.isBlank(request.returningClause)) {
+            throw new IllegalArgumentException('searchTerm and returningClause are required');
         }
-        // Basic structural guard: must start with FIND '
-        if (!request.soslQuery.trim().toUpperCase().startsWith('FIND \'')) {
-            throw new IllegalArgumentException('Invalid SOSL query format');
+        // returningClause is developer-configured (not user input) — guard against single quotes
+        if (request.returningClause.contains('\'')) {
+            throw new IllegalArgumentException('Invalid returningClause');
         }
+        // Escape user input before embedding in FIND clause
+        String safeTerm = '*' + String.escapeSingleQuotes(request.searchTerm) + '*';
+        String soslQuery = 'FIND \'' + safeTerm + '\' IN ALL FIELDS RETURNING ' + request.returningClause;
 
         try {
-            List<List<SObject>> resultGroups = Search.query(request.soslQuery);
+            List<List<SObject>> resultGroups = Search.query(soslQuery);
             List<SObject> records = new List<SObject>();
-            for (List<SObject> group : resultGroups) {
-                records.addAll(group);
+            for (List<SObject> g : resultGroups) {
+                records.addAll(g);
             }
             return convertToSearchResults(records);
         } catch (Exception e) {
-            throw new IllegalArgumentException('SOSL query execution failed: ' + e.getMessage() + '. Query: ' + request.soslQuery);
+            throw new IllegalArgumentException('SOSL query execution failed: ' + e.getMessage() + '. Query: ' + soslQuery);
         }
     }
 

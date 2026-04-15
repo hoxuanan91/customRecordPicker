@@ -5,7 +5,7 @@ import { OmniscriptBaseMixin } from "vlocity_ins/omniscriptBaseMixin";
 
 // ✅ Import Apex method pour SOSL search
 import search from "@salesforce/apex/CustomRecordPickerSearchController.search";
-import { buildSoslQuery } from "./customRecordPickerUtils";
+import { buildSoslReturningClause } from "./customRecordPickerUtils";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 const FIELD_PATH_REGEX =
@@ -552,7 +552,7 @@ export default class CustomRecordPicker extends OmniscriptBaseMixin(
      * @param {string} term - the debounced search term (captured to detect stale results)
      */
     _executeApexSearch(term) {
-        const soslQuery = buildSoslQuery({
+        const returningClause = buildSoslReturningClause({
             searchTerm: term,
             objectApiName: this._cfg.objectApiName,
             searchApiNames: this._searchApiNames,
@@ -561,7 +561,7 @@ export default class CustomRecordPicker extends OmniscriptBaseMixin(
             maxResults: this._cfg.maxResults,
         });
 
-        search({ request: { soslQuery } })
+        search({ request: { searchTerm: term, returningClause } })
             .then((results) => {
                 // Discard if the user has already typed something else
                 if (this._searchTerm !== term) return;

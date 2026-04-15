@@ -253,9 +253,19 @@ export function applySoslFilterLogic(logic, condMap) {
  * @param {number} maxResults - Max number of results (capped at 100)
  * @returns {string} Complete SOSL query string ready to execute
  */
-export function buildSoslQuery({ searchTerm, objectApiName, searchApiNames, allQueryApiNames, filter, maxResults }) {
-    const findTerm = "*" + sanitizeSoslFindTerm(searchTerm) + "*";
-
+/**
+ * Builds the RETURNING clause of a SOSL query from developer-configured params.
+ * The searchTerm is passed separately so Apex can escape it server-side.
+ *
+ * @param {string} searchTerm - Raw user input (used only for LIKE conditions in WHERE)
+ * @param {string} objectApiName - Salesforce object API name
+ * @param {string[]} searchApiNames - Field API names to apply LIKE filter on
+ * @param {string[]} allQueryApiNames - All fields needed in the result (title, subtitle, etc.)
+ * @param {{ criteria: Array, filterLogic: string }} filter - Filter config
+ * @param {number} maxResults - Max number of results (capped at 100)
+ * @returns {string} RETURNING clause, e.g. "Account(Id, Name WHERE Name LIKE '%test%' LIMIT 10)"
+ */
+export function buildSoslReturningClause({ searchTerm, objectApiName, searchApiNames, allQueryApiNames, filter, maxResults }) {
     // Collect all fields needed (Id always first)
     const fieldSet = new Set(["Id", ...allQueryApiNames, ...searchApiNames]);
     for (const c of (filter?.criteria || [])) {
@@ -283,5 +293,5 @@ export function buildSoslQuery({ searchTerm, objectApiName, searchApiNames, allQ
     const where = whereParts.length ? " WHERE " + whereParts.join(" AND ") : "";
     const lim = Math.min(maxResults || 10, 100);
 
-    return `FIND '${findTerm}' IN ALL FIELDS RETURNING ${objectApiName}(${[...fieldSet].join(", ")}${where} LIMIT ${lim})`;
+    return `${objectApiName}(${[...fieldSet].join(", ")}${where} LIMIT ${lim})`;
 }
