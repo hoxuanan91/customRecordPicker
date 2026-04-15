@@ -282,7 +282,9 @@ public with sharing class CustomRecordPickerSearchController {
      * Formats a value for SOSL WHERE clause
      */
     private static String formatSoslValue(Object value, String dataType) {
-        if (value == null) return null;
+        if (value == null) {
+            return 'null';
+        }
         
         // Handle date literals
         if (dataType != null && dataType.toLowerCase().contains('date')) {
@@ -310,7 +312,9 @@ public with sharing class CustomRecordPickerSearchController {
      * Formats a value for SOSL IN/NOT IN clause
      */
     private static String formatSoslInValue(Object value, String dataType) {
-        if (value == null) return null;
+        if (value == null) {
+            return null;
+        }
         
         if (value instanceof List<Object>) {
             List<Object> values = (List<Object>)value;
@@ -444,7 +448,9 @@ public with sharing class CustomRecordPickerSearchController {
      * Parses the compare value based on data type
      */
     private static Object parseCompareValue(Object value, String dataType) {
-        if (value == null) return null;
+        if (value == null) {
+            return null;
+        }
         
         if (dataType != null && dataType.toLowerCase().contains('date')) {
             if (value instanceof Map<String, Object>) {
@@ -463,7 +469,9 @@ public with sharing class CustomRecordPickerSearchController {
      * Parses date literals like LAST_N_YEARS:5
      */
     private static DateTime parseDateLiteral(String literal) {
-        if (String.isBlank(literal)) return null;
+        if (String.isBlank(literal)) {
+            return null;
+        }
         
         String upperLiteral = literal.toUpperCase().trim();
         DateTime now = DateTime.now();
@@ -574,8 +582,12 @@ public with sharing class CustomRecordPickerSearchController {
         if (dataType != null && dataType.toLowerCase().contains('date')) {
             DateTime leftDate = (DateTime)left;
             DateTime rightDate = (DateTime)right;
-            if (leftDate < rightDate) return -1;
-            if (leftDate > rightDate) return 1;
+            if (leftDate < rightDate) {
+                return -1;
+            }
+            if (leftDate > rightDate) {
+                return 1;
+            }
             return 0;
         }
         
@@ -583,8 +595,12 @@ public with sharing class CustomRecordPickerSearchController {
         try {
             Decimal leftVal = Decimal.valueOf(String.valueOf(left));
             Decimal rightVal = Decimal.valueOf(String.valueOf(right));
-            if (leftVal < rightVal) return -1;
-            if (leftVal > rightVal) return 1;
+            if (leftVal < rightVal) {
+                return -1;
+            }
+            if (leftVal > rightVal) {
+                return 1;
+            }
             return 0;
         } catch (Exception e) {
             // Fall back to string comparison
@@ -655,8 +671,11 @@ public with sharing class CustomRecordPickerSearchController {
                 Integer searchIdx = endIdx + 1;
                 while (searchIdx < expr.length() && parenCount > 0) {
                     String currentChar = expr.substring(searchIdx, searchIdx + 1);
-                    if (currentChar == '(') parenCount++;
-                    else if (currentChar == ')') parenCount--;
+                    if (currentChar == '(') {
+                        parenCount++;
+                    } else if (currentChar == ')') {
+                        parenCount--;
+                    }
                     searchIdx++;
                 }
                 String subExpr = expr.substring(endIdx + 1, searchIdx - 1);

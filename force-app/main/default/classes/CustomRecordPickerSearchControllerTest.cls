@@ -233,6 +233,45 @@ public class CustomRecordPickerSearchControllerTest {
     }
 
     @isTest
+    static void testNullValueInSoslWhere() {
+        // Create accounts with and without Industry
+        Account accountWithIndustry = new Account(
+            Name = 'AccountWithIndustry',
+            Industry = 'Technology',
+            Type = 'Customer'
+        );
+        Account accountWithoutIndustry = new Account(
+            Name = 'AccountWithoutIndustry',
+            Industry = null, // Explicitly set to null
+            Type = 'Prospect'
+        );
+        insert new List<Account>{accountWithIndustry, accountWithoutIndustry};
+
+        CustomRecordPickerSearchController.SearchRequest request = new CustomRecordPickerSearchController.SearchRequest();
+        request.searchTerm = 'Industry';
+        request.objectApiName = 'Account';
+        request.searchFields = new List<String>{'Name'};
+        request.maxResults = 10;
+
+        // Add a criterion for Industry = null
+        CustomRecordPickerSearchController.FilterCriterion nullCriterion = new CustomRecordPickerSearchController.FilterCriterion();
+        nullCriterion.fieldPath = 'Industry';
+        nullCriterion.operator = 'eq';
+        nullCriterion.value = null;
+        nullCriterion.dataType = 'Picklist';
+
+        request.criteria = new List<CustomRecordPickerSearchController.FilterCriterion>{nullCriterion};
+
+        Test.startTest();
+        List<CustomRecordPickerSearchController.SearchResult> results = CustomRecordPickerSearchController.search(request);
+        Test.stopTest();
+
+        // Should find only the account with null Industry using SOSL WHERE with = null
+        Assert.isTrue(results.size() > 0, 'Should find account with null Industry in SOSL WHERE');
+        Assert.areEqual(accountWithoutIndustry.Id, results[0].id, 'Should return the account with null Industry');
+    }
+
+    @isTest
     static void testSoslWhereLikeWithPrefixWildcard() {
         // This test demonstrates the FIND * + WHERE LIKE %% strategy
         // FIND 'dupont*' (prefix wildcard for index)
