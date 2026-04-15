@@ -485,6 +485,17 @@ export default class CustomRecordPicker extends OmniscriptBaseMixin(
         }
     }
 
+    _readNodeField(node, fieldPath) {
+        if (!node || !fieldPath) return "";
+        const parts = fieldPath.split(".");
+        let current = node;
+        for (const part of parts) {
+            if (current == null || typeof current !== "object") return "";
+            current = current[part];
+        }
+        return current != null ? current : "";
+    }
+
     _extractFieldValue(fields, fieldPath) {
         const parts = fieldPath.split(".");
         let current = fields;
