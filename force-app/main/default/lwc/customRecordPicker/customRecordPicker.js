@@ -818,7 +818,7 @@ export default class CustomRecordPicker extends OmniscriptBaseMixin(
             // ✅ Call Apex method (await waits for response)
             const results = await search({ request });
 
-            console.log("📥 [SOSL Apex] Results:", results.length + " records");
+            console.log("📥 [SOSL Apex] Results:", results);
 
             this._errorMessage = undefined;
 
@@ -850,15 +850,24 @@ export default class CustomRecordPicker extends OmniscriptBaseMixin(
      */
     _buildApexSubtitle(fields, profile) {
         const subtitleFields = profile?.subtitleFields || this._subtitleFieldsArray;
-        if (!subtitleFields.length) return undefined;
-
-        const parts = subtitleFields
-            .map((field) => {
-                const value = fields[field.apiName];
-                return value ? `${field.fieldLabel} : ${value}` : null;
-            })
-            .filter(Boolean);
-
+        
+        // If subtitleFields are configured, use them
+        if (subtitleFields && subtitleFields.length > 0) {
+            const parts = subtitleFields
+                .map((field) => {
+                    const value = fields[field.apiName];
+                    return value ? `${field.fieldLabel} : ${value}` : null;
+                })
+                .filter(Boolean);
+            return parts.length ? parts.join(" | ") : undefined;
+        }
+        
+        // Fallback: show all fields except the title field as subtitle
+        const titleField = profile?.titleField || this.titleField;
+        const parts = Object.keys(fields)
+            .filter(key => key !== titleField && key !== 'Id' && fields[key] != null)
+            .map(key => `${key} : ${fields[key]}`);
+        
         return parts.length ? parts.join(" | ") : undefined;
     }
 
