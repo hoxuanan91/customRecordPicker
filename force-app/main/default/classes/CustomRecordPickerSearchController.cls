@@ -66,7 +66,11 @@ public with sharing class CustomRecordPickerSearchController {
         
         // If we have additional SOQL filters, we need to apply them post-search
         // because SOSL doesn't support WHERE clauses directly
-        List<SObject> soslResults = Database.search(soslQuery);
+        List<List<SObject>> soslResultGroups = Search.query(soslQuery);
+        List<SObject> soslResults = new List<SObject>();
+        for (List<SObject> resultGroup : soslResultGroups) {
+            soslResults.addAll(resultGroup);
+        }
         
         // Apply SOQL-like filters to SOSL results
         List<SObject> filteredResults = applyFilters(soslResults, request);
@@ -74,7 +78,11 @@ public with sharing class CustomRecordPickerSearchController {
         // Cap results
         Integer resultLimit = Math.min(request.maxResults != null ? request.maxResults : 10, MAX_RESULTS_CAP);
         if (filteredResults.size() > resultLimit) {
-            filteredResults = filteredResults.subList(0, resultLimit);
+            List<SObject> limitedResults = new List<SObject>();
+            for (Integer i = 0; i < resultLimit; i++) {
+                limitedResults.add(filteredResults.get(i));
+            }
+            filteredResults = limitedResults;
         }
         
         // Convert to SearchResult objects with all requested fields
@@ -318,18 +326,21 @@ public with sharing class CustomRecordPickerSearchController {
         String fieldStr = String.valueOf(fieldValue).toLowerCase();
         String compareStr = String.valueOf(compareValue).toLowerCase();
         
-        // Simple LIKE pattern matching
-        // Convert % to .* for regex-like behavior
-        if (compareStr.contains('%')) {
-            String pattern = compareStr.replace('%', '.*');
-            try {
-                return Pattern.matches(pattern, fieldStr);
-            } catch (Exception e) {
-                return false;
-            }
+        // Simple LIKE pattern matching for % wildcards
+        if (compareStr.startsWith('%') && compareStr.endsWith('%') && compareStr.length() > 1) {
+            String content = compareStr.substring(1, compareStr.length() - 1);
+            return fieldStr.contains(content);
+        }
+        if (compareStr.startsWith('%') && compareStr.length() > 1) {
+            String suffix = compareStr.substring(1);
+            return fieldStr.endsWith(suffix);
+        }
+        if (compareStr.endsWith('%') && compareStr.length() > 1) {
+            String prefix = compareStr.substring(0, compareStr.length() - 1);
+            return fieldStr.startsWith(prefix);
         }
         
-        return fieldStr.contains(compareStr);
+        return fieldStr == compareStr;
     }
 
     /**
@@ -395,12 +406,12 @@ public with sharing class CustomRecordPickerSearchController {
             Integer endIdx = notIdx + 4;
             
             // Skip whitespace
-            while (endIdx < expr.length() && expr.charAt(endIdx) == ' ') {
+            while (endIdx < expr.length() && expr.substring(endIdx, endIdx + 1) == ' ') {
                 endIdx++;
             }
             
             // Get the next operand or parenthesized expression
-            char nextChar = expr.charAt(endIdx);
+            String nextChar = expr.substring(endIdx, endIdx + 1);
             Boolean operandResult;
             Integer consumeUntil;
             
@@ -409,8 +420,9 @@ public with sharing class CustomRecordPickerSearchController {
                 Integer parenCount = 1;
                 Integer searchIdx = endIdx + 1;
                 while (searchIdx < expr.length() && parenCount > 0) {
-                    if (expr.charAt(searchIdx) == '(') parenCount++;
-                    else if (expr.charAt(searchIdx) == ')') parenCount--;
+                    String currentChar = expr.substring(searchIdx, searchIdx + 1);
+                    if (currentChar == '(') parenCount++;
+                    else if (currentChar == ')') parenCount--;
                     searchIdx++;
                 }
                 String subExpr = expr.substring(endIdx + 1, searchIdx - 1);
@@ -432,19 +444,19 @@ public with sharing class CustomRecordPickerSearchController {
             
             // Find left operand (must be T or F)
             Integer leftStart = andIdx - 1;
-            while (leftStart >= 0 && expr.charAt(leftStart) == ' ') {
+            while (leftStart >= 0 && expr.substring(leftStart, leftStart + 1) == ' ') {
                 leftStart--;
             }
             
-            Boolean leftVal = (expr.charAt(leftStart) == 'T');
+            Boolean leftVal = (expr.substring(leftStart, leftStart + 1) == 'T');
             
             // Find right operand
             Integer rightStart = andIdx + 4;
-            while (rightStart < expr.length() && expr.charAt(rightStart) == ' ') {
+            while (rightStart < expr.length() && expr.substring(rightStart, rightStart + 1) == ' ') {
                 rightStart++;
             }
             
-            Boolean rightVal = (expr.charAt(rightStart) == 'T');
+            Boolean rightVal = (expr.substring(rightStart, rightStart + 1) == 'T');
             
             Boolean result = leftVal && rightVal;
             String replacement = result ? 'T' : 'F';
@@ -458,19 +470,19 @@ public with sharing class CustomRecordPickerSearchController {
             
             // Find left operand
             Integer leftStart = orIdx - 1;
-            while (leftStart >= 0 && expr.charAt(leftStart) == ' ') {
+            while (leftStart >= 0 && expr.substring(leftStart, leftStart + 1) == ' ') {
                 leftStart--;
             }
             
-            Boolean leftVal = (expr.charAt(leftStart) == 'T');
+            Boolean leftVal = (expr.substring(leftStart, leftStart + 1) == 'T');
             
             // Find right operand
             Integer rightStart = orIdx + 2;
-            while (rightStart < expr.length() && expr.charAt(rightStart) == ' ') {
+            while (rightStart < expr.length() && expr.substring(rightStart, rightStart + 1) == ' ') {
                 rightStart++;
             }
             
-            Boolean rightVal = (expr.charAt(rightStart) == 'T');
+            Boolean rightVal = (expr.substring(rightStart, rightStart + 1) == 'T');
             
             Boolean result = leftVal || rightVal;
             String replacement = result ? 'T' : 'F';
@@ -523,7 +535,7 @@ public with sharing class CustomRecordPickerSearchController {
         sanitized = sanitized.replace('~', '\\~');
         sanitized = sanitized.replace(':', '\\:');
         sanitized = sanitized.replace('"', '\\"');
-        sanitized = sanitized.replace("'", "\\'");
+        sanitized = sanitized.replace('\'', '\\\'');
         sanitized = sanitized.replace('+', '\\+');
         sanitized = sanitized.replace('-', '\\-');
         
@@ -574,9 +586,27 @@ public with sharing class CustomRecordPickerSearchController {
             return false;
         }
         
-        // Field names must start with a letter or underscore
-        // and contain only alphanumeric characters and underscores
-        return fieldName.matches('[a-zA-Z_][a-zA-Z0-9_]*');
+        if (fieldName.length() == 0) {
+            return false;
+        }
+        String firstChar = fieldName.substring(0, 1);
+        Boolean validFirst = (firstChar >= 'A' && firstChar <= 'Z') ||
+                             (firstChar >= 'a' && firstChar <= 'z') ||
+                             (firstChar == '_');
+        if (!validFirst) {
+            return false;
+        }
+        for (Integer i = 1; i < fieldName.length(); i++) {
+            String ch = fieldName.substring(i, i + 1);
+            Boolean validChar = (ch >= 'A' && ch <= 'Z') ||
+                                (ch >= 'a' && ch <= 'z') ||
+                                (ch >= '0' && ch <= '9') ||
+                                (ch == '_');
+            if (!validChar) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -587,7 +617,12 @@ public with sharing class CustomRecordPickerSearchController {
             return false;
         }
         
-        // Object names follow similar rules as field names
-        return objectName.matches('[a-zA-Z_][a-zA-Z0-9_]*(__[cCeE])?');
+        // Object names follow similar rules as field names, with optional __c or __e suffix
+        String lowerName = objectName.toLowerCase();
+        if (lowerName.endsWith('__c') || lowerName.endsWith('__e')) {
+            String baseName = objectName.substring(0, objectName.length() - 3);
+            return isValidFieldName(baseName);
+        }
+        return isValidFieldName(objectName);
     }
 }
