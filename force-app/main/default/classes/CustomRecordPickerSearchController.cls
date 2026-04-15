@@ -13,22 +13,22 @@ public with sharing class CustomRecordPickerSearchController {
      * Represents a search request from the LWC component
      */
     public class SearchRequest {
-        @AuraEnabled public String searchTerm;
-        @AuraEnabled public String objectApiName;
-        @AuraEnabled public List<String> searchFields;
-        @AuraEnabled public Integer maxResults;
-        @AuraEnabled public List<FilterCriterion> criteria;
-        @AuraEnabled public String filterLogic;
+        @AuraEnabled public String searchTerm { get; set; }
+        @AuraEnabled public String objectApiName { get; set; }
+        @AuraEnabled public List<String> searchFields { get; set; }
+        @AuraEnabled public Integer maxResults { get; set; }
+        @AuraEnabled public List<FilterCriterion> criteria { get; set; }
+        @AuraEnabled public String filterLogic { get; set; }
     }
 
     /**
      * Represents a single filter criterion
      */
     public class FilterCriterion {
-        @AuraEnabled public String fieldPath;
-        @AuraEnabled public String operator;
-        @AuraEnabled public Object value;
-        @AuraEnabled public String dataType;
+        @AuraEnabled public String fieldPath { get; set; }
+        @AuraEnabled public String operator { get; set; }
+        @AuraEnabled public Object value { get; set; }
+        @AuraEnabled public String dataType { get; set; }
     }
 
     /**
