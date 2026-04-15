@@ -328,13 +328,13 @@ public with sharing class CustomRecordPickerSearchController {
                 Integer idx = Integer.valueOf(upper.substring(start, i));
                 result += conditions.containsKey(idx) ? conditions.get(idx) : String.valueOf(idx);
 
-            } else if (upper.startsWith('AND', i) && (i + 3 >= len || !isWordChar(upper, i + 3))) {
+            } else if (i + 3 <= len && upper.substring(i, i + 3) == 'AND' && (i + 3 >= len || !isWordChar(upper, i + 3))) {
                 result += ' AND ';
                 i += 3;
-            } else if (upper.startsWith('OR', i) && (i + 2 >= len || !isWordChar(upper, i + 2))) {
+            } else if (i + 2 <= len && upper.substring(i, i + 2) == 'OR' && (i + 2 >= len || !isWordChar(upper, i + 2))) {
                 result += ' OR ';
                 i += 2;
-            } else if (upper.startsWith('NOT', i) && (i + 3 >= len || !isWordChar(upper, i + 3))) {
+            } else if (i + 3 <= len && upper.substring(i, i + 3) == 'NOT' && (i + 3 >= len || !isWordChar(upper, i + 3))) {
                 result += ' NOT ';
                 i += 3;
             } else if (ch == '(' || ch == ')') {
