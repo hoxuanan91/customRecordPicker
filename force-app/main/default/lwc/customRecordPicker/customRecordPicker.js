@@ -1,8 +1,10 @@
 import { LightningElement, api, wire } from "lwc";
-import { gql, graphql } from "lightning/uiGraphQLApi";
 import { getRecord } from "lightning/uiRecordApi";
 import { FlowAttributeChangeEvent } from "lightning/flowSupport";
 import { OmniscriptBaseMixin } from "vlocity_ins/omniscriptBaseMixin";
+
+// ✅ Import Apex method pour SOSL search
+import search from "@salesforce/apex/CustomRecordPickerSearchController.search";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 const FIELD_PATH_REGEX =
@@ -678,7 +680,6 @@ export default class CustomRecordPicker extends OmniscriptBaseMixin(
     _debounceTimer;
     _clickOutsideHandler;
     _results = [];
-    _perfSearchTermSetAt;
 
     // ─── Lifecycle ───────────────────────────────────────────────────────────
 
@@ -777,212 +778,88 @@ export default class CustomRecordPicker extends OmniscriptBaseMixin(
         return parts.length ? parts.join(" | ") : undefined;
     }
 
-    // ─── Wire: SOSL search ───────────────────────────────────────────────────
+    // ─── APEX Search: SOSL with WHERE filters ────────────────────────────────
 
-    @wire(graphql, { query: "$_graphqlQuery", variables: "$_graphqlVariables" })
-    _wiredSearchResults({ data, errors }) {
-        const now = performance.now();
-        const sinceSearch = this._perfSearchTermSetAt
-            ? (now - this._perfSearchTermSetAt).toFixed(2)
-            : "N/A";
-        console.log(`###[PERF] SOSL results received at ${now.toFixed(2)}ms (${sinceSearch}ms after search)`);
-        this._isLoading = false;
-        if (data) {
+    /**
+     * Execute SOSL search via Apex
+     * Apex builds: FIND 'term*' RETURNING Object(fields 
+     *   WHERE (searchField LIKE '%term%' ...) AND (criteria filters)
+     * )
+     */
+    async _executeApexSearch() {
+        if (!this._searchTerm || 
+            this._searchTerm.length < this._cfg.minimumSearchLength) {
+            this._results = [];
+            this._isLoading = false;
+            return;
+        }
+
+        this._isLoading = true;
+        this._errorMessage = undefined;
+
+        try {
+            // ✅ Build the request for Apex
+            const request = {
+                searchTerm: this._searchTerm,
+                objectApiName: this._cfg.objectApiName,
+                searchFields: this._searchApiNames,        // ["Name", "SIRETnumber__c", "Enseigne__c"]
+                maxResults: this._cfg.maxResults,
+                criteria: this._cfg.filter?.criteria || [],
+                filterLogic: this._cfg.filter?.filterLogic
+            };
+
+            console.log("📤 [SOSL Apex] Search request:", {
+                searchTerm: request.searchTerm,
+                object: request.objectApiName,
+                searchFields: request.searchFields,
+                criteria: request.criteria
+            });
+
+            // ✅ Call Apex method (await waits for response)
+            const results = await search({ request });
+
+            console.log("📥 [SOSL Apex] Results:", results.length + " records");
+
             this._errorMessage = undefined;
-            const edges = data.uiapi?.search?.[this.objectApiName]?.edges || [];
-            console.log(`###[PERF] SOSL returned ${edges.length} result(s)`);
-            this._results = edges.map((edge) => {
-                const profile = this._resolveProfileForNode(edge.node);
+
+            // ✅ Transform Apex results to template format
+            this._results = results.map((result) => {
+                const profile = this._resolveProfileForFields(result.fields);
                 const effectiveTitleField = profile?.titleField || this.titleField;
+                
                 return {
-                    id: edge.node.Id,
-                    title: this._readNodeField(edge.node, effectiveTitleField),
-                    subtitle: this._buildFormattedSubtitle(edge.node, profile),
-                    node: edge.node,
+                    id: result.id,
+                    title: result.fields[effectiveTitleField] || result.fields.Name || "",
+                    subtitle: this._buildApexSubtitle(result.fields, profile),
+                    node: result.fields,
                 };
             });
-        }
-        if (errors) {
-            console.error("customRecordPicker: SOSL GraphQL error", JSON.stringify(errors));
-            const messages = [];
-            for (const err of errors) {
-                if (err.errorType === "adapterError" && Array.isArray(err.error)) {
-                    for (const inner of err.error) {
-                        const msg = inner.message || "";
-                        const typeMatch = msg.match(/Variable '(\w+)' of type '(\w+)' used in position expecting type '(\w+)'/);
-                        const fieldMatch = msg.match(/field '(\w+)' can not be filtered in a query call/);
-                        if (typeMatch) {
-                            messages.push(`Configuration filtre: le type "${typeMatch[2]}" est incorrect pour la variable "${typeMatch[1]}", type attendu: "${typeMatch[3]}".`);
-                        } else if (fieldMatch) {
-                            messages.push(`Le champ "${fieldMatch[1]}" ne peut pas être utilisé comme filtre ou champ de recherche.`);
-                        } else if (msg) {
-                            messages.push(msg);
-                        }
-                    }
-                } else if (err.message) {
-                    messages.push(err.message);
-                }
-            }
-            this._errorMessage = messages.length
-                ? messages.join(" | ")
-                : "Erreur lors de la recherche";
+
+        } catch (error) {
+            console.error("❌ [SOSL Apex] Error:", error);
+            this._errorMessage = error?.body?.message || error.message || "Erreur lors de la recherche";
             this._results = [];
+
+        } finally {
+            this._isLoading = false;
         }
     }
 
-    _readNodeField(node, fieldPath) {
-        const parts = fieldPath.split(".");
-        let current = node;
-        for (const part of parts) {
-            if (!current) return "";
-            current = current[part];
-        }
-        if (current == null) return "";
-        if (typeof current === "object") {
-            if (current.displayValue != null) return current.displayValue;
-            return current.value != null ? current.value : "";
-        }
-        return current;
-    }
+    /**
+     * Build subtitle from Apex result fields
+     */
+    _buildApexSubtitle(fields, profile) {
+        const subtitleFields = profile?.subtitleFields || this._subtitleFieldsArray;
+        if (!subtitleFields.length) return undefined;
 
-    _buildFormattedSubtitle(node, profile) {
-        const fields = profile?.subtitleFields || this._subtitleFieldsArray;
-        if (!fields.length) return undefined;
-        const parts = fields
+        const parts = subtitleFields
             .map((field) => {
-                const value = this._readNodeField(node, field.apiName);
+                const value = fields[field.apiName];
                 return value ? `${field.fieldLabel} : ${value}` : null;
             })
             .filter(Boolean);
+
         return parts.length ? parts.join(" | ") : undefined;
-    }
-
-    // ─── SOSL + field-specific WHERE filter ─────────────────────────────────
-    // Strategy:
-    //   1. SOSL FIND pre-filters Account records via the search index (fast).
-    //   2. WHERE OR LIKE restricts those results to records where a searchField
-    //      actually contains the term (field-specific, substring-safe).
-    // A single $likeSearchTerm variable (%term%) is reused across all fields.
-
-    get _filterData() {
-        const filterVariables = {};
-        const variableDeclarations = [];
-        const conditions = [];
-
-        // Search condition — OR LIKE across searchFields
-        if (
-            this._searchTerm &&
-            this._searchTerm.length >= this._cfg.minimumSearchLength &&
-            this._searchFieldsArray.length > 0
-        ) {
-            const likeVal = `%${sanitizeLikeTerm(this._searchTerm)}%`;
-            variableDeclarations.push("$likeSearchTerm: String");
-            filterVariables.likeSearchTerm = likeVal;
-            const searchParts = this._searchFieldsArray.map((field) => {
-                const { prefix, suffix } = fieldPathToWhereNesting(field.apiName);
-                return `{ ${prefix}: { like: $likeSearchTerm }${suffix} }`;
-            });
-            conditions.push(
-                searchParts.length === 1
-                    ? searchParts[0]
-                    : `{ or: [${searchParts.join(", ")}] }`,
-            );
-        }
-
-        const filter = this._cfg.filter;
-        if (filter?.criteria?.length) {
-            const criteriaMap = new Map();
-            filter.criteria.forEach((criterion, index) => {
-                validateFieldPath(criterion.fieldPath, `filter.criteria[${index}].fieldPath`);
-                validateOperator(criterion.operator);
-
-                const varName = `filterVal${index}`;
-                const { prefix, suffix } = fieldPathToWhereNesting(criterion.fieldPath);
-
-                if (isDateValue(criterion.value)) {
-                    const dateGql = serializeDateValue(criterion.value);
-                    criteriaMap.set(index + 1, { _raw: `{ ${prefix}: { ${criterion.operator}: ${dateGql} }${suffix} }` });
-                } else {
-                    criteriaMap.set(index + 1, { _raw: `{ ${prefix}: { ${criterion.operator}: $${varName} }${suffix} }` });
-                    const gqlType = criterion.dataType || inferGraphQLType(criterion.value);
-                    variableDeclarations.push(`$${varName}: ${gqlType}`);
-                    filterVariables[varName] = criterion.value;
-                }
-            });
-
-            let filterTree;
-            if (filter.filterLogic) {
-                filterTree = flattenLogic(parseFilterLogic(filter.filterLogic, criteriaMap));
-            } else {
-                filterTree = criteriaMap.size === 1
-                    ? criteriaMap.get(1)
-                    : { and: [...criteriaMap.values()] };
-            }
-            conditions.push(serializeWhereClause(filterTree));
-        }
-
-        let whereClause = "";
-        if (conditions.length === 1) {
-            whereClause = `where: ${conditions[0]}`;
-        } else if (conditions.length > 1) {
-            whereClause = `where: { and: [${conditions.join(", ")}] }`;
-        }
-
-        return { whereClause, variableDeclarations, filterVariables };
-    }
-
-    // ─── SOSL GraphQL query ──────────────────────────────────────────────────
-
-    get _graphqlQuery() {
-        if (this._configError) return undefined;
-        if (!this.objectApiName || !this.titleField) return undefined;
-        if (!this._searchTerm || this._searchTerm.length < this._cfg.minimumSearchLength) return undefined;
-
-        const { whereClause, variableDeclarations } = this._filterData;
-        // $soslTerm  → passed to SOSL FIND (index-based pre-filter, uses * wildcard)
-        // $likeSearchTerm → comes from _filterData, used in WHERE OR LIKE (field-specific)
-        const allVarDecl = ["$soslTerm: String", ...variableDeclarations];
-        const varDecl = `(${allVarDecl.join(", ")})`;
-        const allFieldsGql = this._allQueryApiNames
-            .map((f) => fieldToGraphQL(f))
-            .join("\n                                    ");
-
-        const now = performance.now();
-        const sinceSearch = this._perfSearchTermSetAt
-            ? (now - this._perfSearchTermSetAt).toFixed(2)
-            : "N/A";
-        console.log(`###[PERF] SOSL query built at ${now.toFixed(2)}ms (${sinceSearch}ms after search)`);
-
-        return gql`
-            query SearchRecords${varDecl} {
-                uiapi {
-                    search(term: $soslTerm) {
-                        ${this.objectApiName}(
-                            first: ${this._cfg.maxResults}
-                            ${whereClause}
-                        ) {
-                            edges {
-                                node {
-                                    Id
-                                    ${allFieldsGql}
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        `;
-    }
-
-    get _graphqlVariables() {
-        if (this._configError) return undefined;
-        if (!this._searchTerm || this._searchTerm.length < this._cfg.minimumSearchLength) return undefined;
-        const { filterVariables } = this._filterData;
-        // soslTerm  : used by SOSL FIND — trailing * for prefix-wildcard matching
-        //             e.g. "dupont" → "dupont*" matches "Dupont SA", "Dupontier"
-        // likeSearchTerm: already built in _filterData as "%term%"
-        //             handles substring matching in the WHERE OR LIKE conditions
-        return { soslTerm: `${sanitizeSoslTerm(this._searchTerm)}*`, ...filterVariables };
     }
 
     // ─── Template getters ────────────────────────────────────────────────────
@@ -1053,8 +930,6 @@ export default class CustomRecordPicker extends OmniscriptBaseMixin(
         }
         this._debounceTimer = setTimeout(() => {
             this._searchTerm = term;
-            this._perfSearchTermSetAt = performance.now();
-            console.log(`###[PERF] _searchTerm set to "${term}" at ${this._perfSearchTermSetAt.toFixed(2)}ms`);
             this._highlightedIndex = -1;
 
             this._validateConfiguration();
@@ -1068,6 +943,8 @@ export default class CustomRecordPicker extends OmniscriptBaseMixin(
             if (term && term.length >= this._cfg.minimumSearchLength) {
                 this._isLoading = true;
                 this._isDropdownOpen = true;
+                // ✅ Appeler la recherche Apex au lieu de dépendre de @wire
+                this._executeApexSearch();
             } else {
                 this._isLoading = false;
                 this._isDropdownOpen = false;
