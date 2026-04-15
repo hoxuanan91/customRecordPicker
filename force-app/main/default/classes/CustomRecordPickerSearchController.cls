@@ -255,30 +255,30 @@ public with sharing class CustomRecordPickerSearchController {
      */
     private static Boolean evaluateCriterion(SObject record, FilterCriterion criterion) {
         Object fieldValue = getFieldValue(record, criterion.fieldPath);
-        Object compareValue = criterion.value;
+        Object compareValue = parseCompareValue(criterion.value, criterion.dataType);
         String operator = criterion.operator.toLowerCase();
         
         switch on operator {
             when 'eq' {
-                return fieldValue == compareValue;
+                return performEqualsComparison(fieldValue, compareValue, criterion.dataType);
             }
             when 'ne' {
-                return fieldValue != compareValue;
+                return !performEqualsComparison(fieldValue, compareValue, criterion.dataType);
             }
             when 'like' {
                 return performLikeComparison(fieldValue, compareValue);
             }
             when 'gt' {
-                return performNumericComparison(fieldValue, compareValue) > 0;
+                return performComparison(fieldValue, compareValue, criterion.dataType) > 0;
             }
             when 'gte' {
-                return performNumericComparison(fieldValue, compareValue) >= 0;
+                return performComparison(fieldValue, compareValue, criterion.dataType) >= 0;
             }
             when 'lt' {
-                return performNumericComparison(fieldValue, compareValue) < 0;
+                return performComparison(fieldValue, compareValue, criterion.dataType) < 0;
             }
             when 'lte' {
-                return performNumericComparison(fieldValue, compareValue) <= 0;
+                return performComparison(fieldValue, compareValue, criterion.dataType) <= 0;
             }
             when 'in' {
                 return performInComparison(fieldValue, compareValue);
@@ -293,9 +293,54 @@ public with sharing class CustomRecordPickerSearchController {
     }
 
     /**
-     * Gets a field value from a record, supporting nested field paths (e.g., "Account.Name")
+     * Parses the compare value based on data type
      */
-    private static Object getFieldValue(SObject record, String fieldPath) {
+    private static Object parseCompareValue(Object value, String dataType) {
+        if (value == null) return null;
+        
+        if (dataType != null && dataType.toLowerCase().contains('date')) {
+            if (value instanceof Map<String, Object>) {
+                Map<String, Object> valueMap = (Map<String, Object>)value;
+                if (valueMap.containsKey('literal')) {
+                    String literal = (String)valueMap.get('literal');
+                    return parseDateLiteral(literal);
+                }
+            }
+        }
+        
+        return value;
+    }
+
+    /**
+     * Parses date literals like LAST_N_YEARS:5
+     */
+    private static DateTime parseDateLiteral(String literal) {
+        if (String.isBlank(literal)) return null;
+        
+        String upperLiteral = literal.toUpperCase().trim();
+        DateTime now = DateTime.now();
+        
+        if (upperLiteral.startsWith('LAST_N_YEARS:')) {
+            Integer years = Integer.valueOf(upperLiteral.substringAfter('LAST_N_YEARS:'));
+            return now.addYears(-years);
+        }
+        if (upperLiteral.startsWith('LAST_N_DAYS:')) {
+            Integer days = Integer.valueOf(upperLiteral.substringAfter('LAST_N_DAYS:'));
+            return now.addDays(-days);
+        }
+        if (upperLiteral == 'TOMORROW') {
+            return now.addDays(1);
+        }
+        if (upperLiteral == 'TODAY') {
+            return DateTime.newInstance(Date.today(), Time.newInstance(0, 0, 0, 0));
+        }
+        if (upperLiteral == 'YESTERDAY') {
+            return now.addDays(-1);
+        }
+        
+        // Add more literals as needed
+        return null;
+    }
         String[] parts = fieldPath.split('\\.');
         Object current = record;
         
@@ -344,20 +389,52 @@ public with sharing class CustomRecordPickerSearchController {
     }
 
     /**
-     * Performs numeric comparison
+     * Performs equals comparison based on data type
+     */
+    private static Boolean performEqualsComparison(Object left, Object right, String dataType) {
+        if (left == null || right == null) {
+            return left == right;
+        }
+        
+        if (dataType != null && dataType.toLowerCase().contains('date')) {
+            DateTime leftDate = (DateTime)left;
+            DateTime rightDate = (DateTime)right;
+            return leftDate == rightDate;
+        }
+        
+        return left == right;
+    }
+
+    /**
+     * Performs comparison (<, >, <=, >=) based on data type
      * Returns: negative if left < right, 0 if equal, positive if left > right
      */
-    private static Integer performNumericComparison(Object left, Object right) {
+    private static Integer performComparison(Object left, Object right, String dataType) {
         if (left == null || right == null) {
             return left == right ? 0 : (left == null ? -1 : 1);
         }
         
-        Decimal leftVal = Decimal.valueOf(String.valueOf(left));
-        Decimal rightVal = Decimal.valueOf(String.valueOf(right));
+        if (dataType != null && dataType.toLowerCase().contains('date')) {
+            DateTime leftDate = (DateTime)left;
+            DateTime rightDate = (DateTime)right;
+            if (leftDate < rightDate) return -1;
+            if (leftDate > rightDate) return 1;
+            return 0;
+        }
         
-        if (leftVal < rightVal) return -1;
-        if (leftVal > rightVal) return 1;
-        return 0;
+        // Try numeric comparison first
+        try {
+            Decimal leftVal = Decimal.valueOf(String.valueOf(left));
+            Decimal rightVal = Decimal.valueOf(String.valueOf(right));
+            if (leftVal < rightVal) return -1;
+            if (leftVal > rightVal) return 1;
+            return 0;
+        } catch (Exception e) {
+            // Fall back to string comparison
+            String leftStr = String.valueOf(left);
+            String rightStr = String.valueOf(right);
+            return leftStr.compareTo(rightStr);
+        }
     }
 
     /**
