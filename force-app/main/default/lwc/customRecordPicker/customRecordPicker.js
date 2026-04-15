@@ -2,23 +2,24 @@ import { LightningElement, api, wire } from "lwc";
 import { gql, graphql } from "lightning/uiGraphQLApi";
 import { getRecord } from "lightning/uiRecordApi";
 import { FlowAttributeChangeEvent } from "lightning/flowSupport";
-import {
-    validateFieldPath,
-    validateObjectName,
-    validateOperator,
-    sanitizeSearchTerm,
-    parseFilterLogic,
-    flattenLogic,
-    fieldToGraphQL,
-    fieldPathToWhereNesting,
-    serializeWhereClause,
-    isDateLiteral,
-    inferGraphQLType,
-} from "./customRecordPickerUtils";
+import { OmniscriptBaseMixin } from "vlocity_ins/omniscriptBaseMixin";
 
-// ─── Constants ────────────────────────────────────────────────────────────────
-const WIDTH_PATTERN =
-    /^(auto|fit-content|max-content|min-content|[0-9]+(?:\.[0-9]+)?(?:px|rem|em|%|vw|vh))$/i;
+// ─── Constants ───────────────────────────────────────────────────────────────
+const FIELD_PATH_REGEX =
+    /^[A-Za-z]\w*(__[cCrReE])?(\.[A-Za-z]\w*(__[cCrReE])?)*$/;
+const OBJECT_NAME_REGEX = /^[A-Za-z]\w*(__[cCeE])?$/;
+const ALLOWED_OPERATORS = new Set([
+    "eq",
+    "ne",
+    "like",
+    "gt",
+    "gte",
+    "lt",
+    "lte",
+    "in",
+    "nin",
+]);
+const SALESFORCE_ID_REGEX = /^[a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?$/;
 const DEBOUNCE_DELAY = 300;
 const MAX_RESULTS_CAP = 100;
 const DEFAULT_MAX_RESULTS = 10;
@@ -27,20 +28,412 @@ const DEFAULT_PLACEHOLDER = "Rechercher...";
 const DEFAULT_ERROR_MESSAGE = "Complétez ce champ.";
 const EMPTY_MESSAGE = "Aucun résultat trouvé";
 
+// ─── Validation helpers ──────────────────────────────────────────────────────
 
-// ─── Component ────────────────────────────────────────────────────────────────
+function validateFieldPath(value, propName) {
+    if (!value) return;
+    if (!FIELD_PATH_REGEX.test(value)) {
+        throw new Error(
+            `customRecordPicker: "${propName}" contains invalid characters: "${value}".`,
+        );
+    }
+}
 
-export default class CustomRecordPicker extends LightningElement {
-    // ─── Public API ───────────────────────────────────────────────────────────
+function validateObjectName(value) {
+    if (!value) return;
+    if (!OBJECT_NAME_REGEX.test(value)) {
+        throw new Error(
+            `customRecordPicker: "objectApiName" contains invalid characters: "${value}".`,
+        );
+    }
+}
+
+function validateOperator(op) {
+    if (!ALLOWED_OPERATORS.has(op)) {
+        throw new Error(
+            `customRecordPicker: Unsupported filter operator "${op}".`,
+        );
+    }
+}
+
+function sanitizeSearchTerm(term) {
+    return term.replace(/[%_]/g, "\\$&");
+}
+
+function parseLooseJsonString(raw) {
+    if (typeof raw !== "string") return raw;
+    let normalized = raw.trim();
+    // OmniScript wraps the payload with \' ... ' or ' ... ' — strip each end independently.
+    if (normalized.startsWith("\\'")) {
+        normalized = normalized.slice(2);
+    } else if (normalized.startsWith("'")) {
+        normalized = normalized.slice(1);
+    }
+    if (normalized.endsWith("\\'")) {
+        normalized = normalized.slice(0, -2);
+    } else if (normalized.endsWith("'")) {
+        normalized = normalized.slice(0, -1);
+    }
+
+    normalized = normalized.replace(/,\s*([}\]])/g, "$1");
+    return JSON.parse(normalized);
+}
+
+// ─── Filter logic parser (recursive descent) ────────────────────────────────
+
+function tokenize(filterLogic) {
+    const tokens = [];
+    let i = 0;
+    const str = filterLogic.toUpperCase().trim();
+    while (i < str.length) {
+        if (str[i] === " " || str[i] === "\t") {
+            i++;
+            continue;
+        }
+        if (str[i] === "(") {
+            tokens.push({ type: "LPAREN" });
+            i++;
+            continue;
+        }
+        if (str[i] === ")") {
+            tokens.push({ type: "RPAREN" });
+            i++;
+            continue;
+        }
+        if (
+            str.startsWith("AND", i) &&
+            (i + 3 >= str.length || /\W/.test(str[i + 3]))
+        ) {
+            tokens.push({ type: "AND" });
+            i += 3;
+            continue;
+        }
+        if (
+            str.startsWith("OR", i) &&
+            (i + 2 >= str.length || /\W/.test(str[i + 2]))
+        ) {
+            tokens.push({ type: "OR" });
+            i += 2;
+            continue;
+        }
+        if (
+            str.startsWith("NOT", i) &&
+            (i + 3 >= str.length || /\W/.test(str[i + 3]))
+        ) {
+            tokens.push({ type: "NOT" });
+            i += 3;
+            continue;
+        }
+        const numMatch = str.slice(i).match(/^\d+/);
+        if (numMatch) {
+            tokens.push({ type: "NUMBER", value: parseInt(numMatch[0], 10) });
+            i += numMatch[0].length;
+            continue;
+        }
+        throw new Error(
+            `customRecordPicker: Unexpected character "${str[i]}" in filterLogic at position ${i}`,
+        );
+    }
+    return tokens;
+}
+
+function parseFilterLogic(filterLogic, criteriaMap) {
+    const tokens = tokenize(filterLogic);
+    let pos = 0;
+    function peek() {
+        return tokens[pos];
+    }
+    function consume(type) {
+        const t = tokens[pos];
+        if (!t || t.type !== type) {
+            throw new Error(
+                `customRecordPicker: Expected ${type} at position ${pos} in filterLogic, got ${t?.type || "EOF"}`,
+            );
+        }
+        pos++;
+        return t;
+    }
+    function parseExpr() {
+        let left = parseTerm();
+        while (peek()?.type === "OR") {
+            consume("OR");
+            left = { or: [left, parseTerm()] };
+        }
+        return left;
+    }
+    function parseTerm() {
+        let left = parseFactor();
+        while (peek()?.type === "AND") {
+            consume("AND");
+            left = { and: [left, parseFactor()] };
+        }
+        return left;
+    }
+    function parseFactor() {
+        if (peek()?.type === "NOT") {
+            consume("NOT");
+            return { not: parseFactor() };
+        }
+        if (peek()?.type === "LPAREN") {
+            consume("LPAREN");
+            const expr = parseExpr();
+            consume("RPAREN");
+            return expr;
+        }
+        const token = consume("NUMBER");
+        const criterion = criteriaMap.get(token.value);
+        if (!criterion) {
+            throw new Error(
+                `customRecordPicker: filterLogic references criterion ${token.value} which does not exist`,
+            );
+        }
+        return criterion;
+    }
+    const result = parseExpr();
+    if (pos < tokens.length) {
+        throw new Error(
+            `customRecordPicker: Unexpected token at position ${pos}`,
+        );
+    }
+    return result;
+}
+
+function flattenLogic(node) {
+    if (!node) return node;
+    if (node.and) {
+        const flat = [];
+        for (const child of node.and) {
+            const f = flattenLogic(child);
+            if (f.and) {
+                flat.push(...f.and);
+            } else {
+                flat.push(f);
+            }
+        }
+        return { and: flat };
+    }
+    if (node.or) {
+        const flat = [];
+        for (const child of node.or) {
+            const f = flattenLogic(child);
+            if (f.or) {
+                flat.push(...f.or);
+            } else {
+                flat.push(f);
+            }
+        }
+        return { or: flat };
+    }
+    if (node.not) {
+        return { not: flattenLogic(node.not) };
+    }
+    return node;
+}
+
+// ─── GraphQL helpers ─────────────────────────────────────────────────────────
+
+function fieldToGraphQL(fieldPath) {
+    const parts = fieldPath.split(".");
+    let result = "";
+    for (let i = 0; i < parts.length - 1; i++) {
+        result += `${parts[i]} { `;
+    }
+    const leaf = parts[parts.length - 1];
+    result += leaf === "Id" ? "Id" : `${leaf} { value displayValue }`;
+    for (let i = 0; i < parts.length - 1; i++) {
+        result += " }";
+    }
+    return result;
+}
+
+function fieldPathToWhereNesting(fieldPath) {
+    const parts = fieldPath.split(".");
+    if (parts.length === 1) return { prefix: parts[0], suffix: "" };
+    let prefix = "",
+        suffix = "";
+    for (let i = 0; i < parts.length - 1; i++) {
+        prefix += `${parts[i]}: { `;
+        suffix += " }";
+    }
+    prefix += parts[parts.length - 1];
+    return { prefix, suffix };
+}
+
+function serializeWhereClause(node) {
+    if (!node) return "";
+    if (node.and)
+        return `{ and: [${node.and.map(serializeWhereClause).join(", ")}] }`;
+    if (node.or)
+        return `{ or: [${node.or.map(serializeWhereClause).join(", ")}] }`;
+    if (node.not) return `{ not: ${serializeWhereClause(node.not)} }`;
+    if (node._raw) return node._raw;
+    return "";
+}
+
+/**
+ * Check if a filter value is a date/datetime input object.
+ * Supports:
+ *   { literal: "TODAY" }           → simple DATE_LITERAL enum
+ *   { literal: "LAST_N_DAYS:30" }  → auto-converted to range
+ *   { range: { last_n_days: 30 } } → explicit DateRange
+ */
+function isDateValue(value) {
+    if (value === null || typeof value !== "object") return false;
+    return (
+        typeof value.literal === "string" ||
+        (typeof value.range === "object" && value.range !== null)
+    );
+}
+
+/**
+ * Serialize a date value object into inline GraphQL syntax.
+ *
+ * Examples:
+ *   { literal: "TODAY" }            → { literal: TODAY }
+ *   { literal: "LAST_N_DAYS:30" }   → { range: { last_n_days: 30 } }
+ *   { range: { last_n_days: 30 } }  → { range: { last_n_days: 30 } }
+ */
+function serializeDateValue(value) {
+    if (typeof value.literal === "string") {
+        const rangeMatch = value.literal.match(/^([A-Z_]+):(\d+)$/);
+        if (rangeMatch) {
+            const rangeName = rangeMatch[1].toLowerCase();
+            const rangeVal = parseInt(rangeMatch[2], 10);
+            return `{ range: { ${rangeName}: ${rangeVal} } }`;
+        }
+        return `{ literal: ${value.literal} }`;
+    }
+    if (value.range && typeof value.range === "object") {
+        const entries = Object.entries(value.range);
+        if (entries.length === 1) {
+            const [key, val] = entries[0];
+            return `{ range: { ${key}: ${val} } }`;
+        }
+    }
+    throw new Error(
+        `customRecordPicker: Invalid date value: ${JSON.stringify(value)}`,
+    );
+}
+
+/**
+ * Infer the GraphQL variable type from a filter criterion value.
+ */
+function inferGraphQLType(value) {
+    if (value === null) return "String";
+    if (isDateValue(value)) return "DateTime";
+    if (typeof value === "string" && SALESFORCE_ID_REGEX.test(value))
+        return "ID";
+    if (typeof value === "number")
+        return Number.isInteger(value) ? "Int" : "Float";
+    if (typeof value === "boolean") return "Boolean";
+    return "String";
+}
+
+// ─── Component ───────────────────────────────────────────────────────────────
+
+export default class CustomRecordPicker extends OmniscriptBaseMixin(
+    LightningElement
+) {
+    // ─── Public API ──────────────────────────────────────────────────────────
 
     @api disabled;
-    @api width = "640px";
+    @api width //= "640px";
+    @api useOmniscript = false;
     @api useFlow = false;
+    @api outputKey = "selectedRecord";
 
-    _config;
+    _config = /*{
+    "label": "Test tous les opérateurs",
+    "objectApiName": "Account",
+    "titleField": "Name",
+    "subtitleFields": [
+        { "apiName": "Type", "fieldLabel": "Type" },
+        { "apiName": "Industry", "fieldLabel": "Secteur" },
+        { "apiName": "AnnualRevenue", "fieldLabel": "CA" }
+    ],
+    "searchFields": [
+        { "apiName": "Name" }
+    ],
+    "iconName": "standard:account",
+    "filter": {
+        "criteria": [
+            { "fieldPath": "Type", "operator": "eq", "value": "Prospect", "dataType": "Picklist" },
+            { "fieldPath": "Type", "operator": "ne", "value": "Other", "dataType": "Picklist" },
+            { "fieldPath": "Name", "operator": "like", "value": "%a%" },
+            { "fieldPath": "CreatedDate", "operator": "gt", "value": { "literal": "LAST_N_YEARS:5" }, "dataType": "DateTime" },
+            { "fieldPath": "CreatedDate", "operator": "gte", "value": { "literal": "LAST_N_DAYS:365" }, "dataType": "DateTime" },
+            { "fieldPath": "CreatedDate", "operator": "lt", "value": { "literal": "TOMORROW" }, "dataType": "DateTime" },
+            { "fieldPath": "CreatedDate", "operator": "lte", "value": { "literal": "TODAY" }, "dataType": "DateTime" },
+            { "fieldPath": "Type", "operator": "in", "value": ["Prospect", "Customer"], "dataType": "[Picklist]" },
+            { "fieldPath": "Type", "operator": "nin", "value": ["Other"], "dataType": "[Picklist]" }
+        ],
+        "filterLogic": "1 OR 2 OR 3 OR 4 OR 5 OR 6 OR 7 OR 8 OR 9"
+    },
+    "maxResults": 50,
+    "minimumSearchLength": 2
+}*/
+{
+   "label":"Tiers payeurs",
+   "objectApiName":"Account",
+   "titleField":"Name",
+   "discriminator":"IsPersonAccount",
+   "displayProfiles":{
+      "true":{
+         "subtitleFields":[
+            {
+               "apiName":"FirstName",
+               "fieldLabel":"Prénom"
+            },
+            {
+               "apiName":"LastName",
+               "fieldLabel":"Nom"
+            },
+            {
+               "apiName":"PersonNumber__c",
+               "fieldLabel":"N° de personne"
+            }
+         ]
+      },
+      "false":{
+         "subtitleFields":[
+            {
+               "apiName":"Name",
+               "fieldLabel":"Raison sociale"
+            },
+            {
+               "apiName":"Enseigne__c",
+               "fieldLabel":"Enseigne"
+            },
+            {
+               "apiName":"SIRETnumber__c",
+               "fieldLabel":"SIRET"
+            }
+         ]
+      }
+   },
+   "searchFields":[
+      {
+         "apiName":"SIRETnumber__c"
+      },
+      {
+         "apiName":"Enseigne__c"
+      },
+      {
+         "apiName":"Name"
+      }
+   ],
+   "iconName":"standard:account",
+   "filter":{
+      "criteria":[
+      ],
+      "filterLogic":"1"
+   },
+   "placeholder":"Rechercher tiers payeur",
+   "required":true,
+   "maxResults":30,
+   "minimumSearchLength":2
+}
     _value;
-    _cfgCache;
-    _filterDataCache = { term: undefined, data: undefined };
 
     @api
     get config() {
@@ -48,10 +441,9 @@ export default class CustomRecordPicker extends LightningElement {
     }
     set config(val) {
         this._configError = undefined;
-        this._cfgCache = undefined;
         if (typeof val === "string" && val) {
             try {
-                this._config = JSON.parse(val.trim().replace(/^[\\']+|[\\']+$/g, ""));
+                this._config = parseLooseJsonString(val);
             } catch {
                 this._config = {};
                 this._configError =
@@ -62,6 +454,7 @@ export default class CustomRecordPicker extends LightningElement {
         } else {
             this._config = {};
         }
+
         this._validateConfiguration();
     }
 
@@ -74,13 +467,40 @@ export default class CustomRecordPicker extends LightningElement {
         if (!val) {
             this._selectedTitle = undefined;
             this._selectedSubtitle = undefined;
+            this._selectedRecord = undefined;
         }
+    }
+
+    @api
+    get outputFields() {
+        return this._outputFields;
+    }
+    set outputFields(val) {
+        if (Array.isArray(val)) {
+            this._outputFields = val;
+        } else if (typeof val === "string" && val.trim()) {
+            const trimmed = val.trim().replace(/^[\\']|[\\']$/g, "");
+            try {
+                const parsed = JSON.parse(trimmed);
+                this._outputFields = Array.isArray(parsed) ? parsed : [];
+            } catch {
+                this._outputFields = trimmed.split(",").map((f) => f.trim()).filter(Boolean);
+            }
+        } else {
+            this._outputFields = [];
+        }
+    }
+
+    @api
+    get selectedRecord() {
+        return this._selectedRecord;
     }
 
     @api clearSelection() {
         this._value = undefined;
         this._selectedTitle = undefined;
         this._selectedSubtitle = undefined;
+        this._selectedRecord = undefined;
         this._searchTerm = undefined;
         this._results = [];
         this._isDropdownOpen = false;
@@ -93,6 +513,7 @@ export default class CustomRecordPicker extends LightningElement {
         if (this._configError) {
             return { isValid: false, errorMessage: this._configError };
         }
+
         if (this._cfg.required && !this._value) {
             this._validationError =
                 this._cfg.messageWhenValueMissing || DEFAULT_ERROR_MESSAGE;
@@ -106,93 +527,136 @@ export default class CustomRecordPicker extends LightningElement {
         return this.validate().isValid;
     }
 
-    // ─── Config accessor (cached per config change) ───────────────────────────
+    // ─── Config accessors ────────────────────────────────────────────────────
 
     get _cfg() {
-        if (!this._cfgCache) {
-            const c = this._config || {};
-            this._cfgCache = {
-                label: c.label || "Rechercher un enregistrement",
-                objectApiName: c.objectApiName,
-                titleField: c.titleField || "Name",
-                subtitleFields: c.subtitleFields || [],
-                searchFields: (Array.isArray(c.searchFields) ? c.searchFields : []).map(
-                    (f) =>
-                        typeof f === "string"
-                            ? { apiName: f, dataType: "String" }
-                            : { ...f, dataType: f.dataType || "String" },
-                ),
-                iconName: c.iconName,
-                placeholder: c.placeholder || DEFAULT_PLACEHOLDER,
-                filter: c.filter,
-                discriminator: c.discriminator || undefined,
-                displayProfiles: c.displayProfiles || undefined,
-                required: c.required || false,
-                maxResults: Math.min(
-                    c.maxResults || DEFAULT_MAX_RESULTS,
-                    MAX_RESULTS_CAP,
-                ),
-                minimumSearchLength:
-                    c.minimumSearchLength ?? DEFAULT_MIN_SEARCH_LENGTH,
-                messageWhenValueMissing:
-                    c.messageWhenValueMissing || DEFAULT_ERROR_MESSAGE,
-            };
-        }
-        return this._cfgCache;
+        const c = this._config || {};
+        return {
+            label: c.label || "Rechercher un enregistrement",
+            objectApiName: c.objectApiName,
+            titleField: c.titleField || "Name",
+            subtitleFields: c.subtitleFields || [],
+            searchFields: (Array.isArray(c.searchFields)
+                ? c.searchFields
+                : []
+            ).map((field) =>
+                typeof field === "string"
+                    ? { apiName: field, dataType: "String" }
+                    : { ...field, dataType: field.dataType || "String" },
+            ),
+            iconName: c.iconName,
+            placeholder: c.placeholder || DEFAULT_PLACEHOLDER,
+            filter: c.filter,
+            discriminator: c.discriminator || undefined,
+            displayProfiles: c.displayProfiles || undefined,
+            required: c.required || false,
+            maxResults: Math.min(
+                c.maxResults || DEFAULT_MAX_RESULTS,
+                MAX_RESULTS_CAP,
+            ),
+            minimumSearchLength:
+                c.minimumSearchLength ?? DEFAULT_MIN_SEARCH_LENGTH,
+            messageWhenValueMissing:
+                c.messageWhenValueMissing || DEFAULT_ERROR_MESSAGE,
+            outputFields: Array.isArray(c.outputFields) ? c.outputFields : [],
+        };
     }
 
-    get label()         { return this._cfg.label; }
-    get objectApiName() { return this._cfg.objectApiName; }
-    get titleField()    { return this._cfg.titleField; }
-    get iconName()      { return this._cfg.iconName; }
-    get required()      { return this._cfg.required; }
-    get placeholder()   { return this._cfg.placeholder; }
+    get label() {
+        return this._cfg.label;
+    }
+    get objectApiName() {
+        return this._cfg.objectApiName;
+    }
+    get titleField() {
+        return this._cfg.titleField;
+    }
+    get iconName() {
+        return this._cfg.iconName;
+    }
+    get required() {
+        return this._cfg.required;
+    }
+    get placeholder() {
+        return this._cfg.placeholder;
+    }
 
-    // ─── Display profiles ─────────────────────────────────────────────────────
+    get _subtitleFieldsArray() {
+        return this._cfg.subtitleFields;
+    }
+    get _subtitleApiNames() {
+        return this._subtitleFieldsArray.map((f) => f.apiName);
+    }
+    get _searchFieldsArray() {
+        return this._cfg.searchFields;
+    }
+    get _searchApiNames() {
+        return this._searchFieldsArray.map((f) => f.apiName);
+    }
+
+    // ─── Display profiles ────────────────────────────────────────────────────
 
     get _hasDisplayProfiles() {
-        const { discriminator, displayProfiles } = this._cfg;
+        const cfg = this._cfg;
         return (
-            !!discriminator &&
-            !!displayProfiles &&
-            Object.keys(displayProfiles).length > 0
+            !!cfg.discriminator &&
+            !!cfg.displayProfiles &&
+            Object.keys(cfg.displayProfiles).length > 0
         );
     }
 
     _getDisplayProfile(discriminatorValue) {
         if (!this._hasDisplayProfiles) return undefined;
-        return this._cfg.displayProfiles[String(discriminatorValue ?? "")] || undefined;
+        const key = String(discriminatorValue ?? "");
+        return this._cfg.displayProfiles[key] || undefined;
     }
 
     _resolveProfileForNode(node) {
         if (!this._hasDisplayProfiles) return undefined;
-        return this._getDisplayProfile(this._readNodeField(node, this._cfg.discriminator));
+        const val = this._readNodeField(node, this._cfg.discriminator);
+        return this._getDisplayProfile(val);
     }
 
     _resolveProfileForFields(fields) {
         if (!this._hasDisplayProfiles) return undefined;
-        return this._getDisplayProfile(this._extractFieldValue(fields, this._cfg.discriminator));
+        const val = this._extractFieldValue(fields, this._cfg.discriminator);
+        return this._getDisplayProfile(val);
     }
 
     get _allQueryApiNames() {
-        const names = new Set([this.titleField]);
-        this._cfg.subtitleFields.forEach((f) => names.add(f.apiName));
-        if (this._cfg.discriminator) names.add(this._cfg.discriminator);
+        const names = new Set();
+        names.add(this.titleField);
+        for (const f of this._subtitleApiNames) {
+            names.add(f);
+        }
+        if (this._cfg.discriminator) {
+            names.add(this._cfg.discriminator);
+        }
         if (this._hasDisplayProfiles) {
             for (const profile of Object.values(this._cfg.displayProfiles)) {
                 if (profile.titleField) names.add(profile.titleField);
                 if (Array.isArray(profile.subtitleFields)) {
-                    profile.subtitleFields.forEach((f) => names.add(f.apiName));
+                    for (const f of profile.subtitleFields) {
+                        names.add(f.apiName);
+                    }
                 }
             }
+        }
+        for (const f of this._outputFields) {
+            names.add(f);
+        }
+        for (const f of this._cfg.outputFields) {
+            names.add(f);
         }
         return [...names];
     }
 
-    // ─── Internal state ───────────────────────────────────────────────────────
+    // ─── Internal state ──────────────────────────────────────────────────────
 
     _selectedTitle;
     _selectedSubtitle;
+    _selectedRecord;
+    _outputFields = [];
     _searchTerm;
     _isDropdownOpen = false;
     _highlightedIndex = -1;
@@ -203,11 +667,16 @@ export default class CustomRecordPicker extends LightningElement {
     _debounceTimer;
     _clickOutsideHandler;
     _results = [];
+    _perfSearchTermSetAt;
+    _perfQueryBuiltAt;
+    _seenIds = new Set();
+    _pendingSearchCount = 0;
 
-    // ─── Lifecycle ────────────────────────────────────────────────────────────
+    // ─── Lifecycle ───────────────────────────────────────────────────────────
 
     connectedCallback() {
         this._validateConfiguration();
+        // close dropdown list when clicking outside of the component
         this._clickOutsideHandler = (event) => {
             if (
                 !this.template
@@ -224,36 +693,46 @@ export default class CustomRecordPicker extends LightningElement {
     disconnectedCallback() {
         // eslint-disable-next-line @lwc/lwc/no-document-query
         document.removeEventListener("click", this._clickOutsideHandler);
-        clearTimeout(this._debounceTimer);
+        if (this._debounceTimer) {
+            clearTimeout(this._debounceTimer);
+        }
     }
 
     renderedCallback() {
         this._applyWidth();
     }
 
-    // ─── Wire: fetch selected record for pill display ──────────────────────────
+    // ─── Wire: fetch selected record for pill display ────────────────────────
 
     get _selectedRecordFields() {
         if (!this._value || !this.objectApiName || !this.titleField)
             return undefined;
-        return this._allQueryApiNames.map((f) => `${this.objectApiName}.${f}`);
+        return this._allQueryApiNames.map(
+            (f) => `${this.objectApiName}.${f}`,
+        );
     }
 
     @wire(getRecord, { recordId: "$_value", fields: "$_selectedRecordFields" })
     _wiredSelectedRecord({ data, error }) {
         if (data) {
             const profile = this._resolveProfileForFields(data.fields);
+            const effectiveTitleField =
+                profile?.titleField || this.titleField;
             this._selectedTitle = this._extractFieldValue(
                 data.fields,
-                profile?.titleField || this.titleField,
+                effectiveTitleField,
             );
-            this._selectedSubtitle = this._buildSubtitle(
-                profile?.subtitleFields || this._cfg.subtitleFields,
-                (apiName) => this._extractFieldValue(data.fields, apiName),
+            this._selectedSubtitle = this._buildSelectedSubtitle(
+                data.fields,
+                profile,
             );
+            this._selectedRecord = this._buildOutputRecordFromFields(data.fields);
         }
         if (error) {
-            console.error("customRecordPicker: Error loading selected record", error);
+            console.error(
+                "customRecordPicker: Error loading selected record",
+                error,
+            );
         }
     }
 
@@ -265,45 +744,122 @@ export default class CustomRecordPicker extends LightningElement {
             const node = current[parts[i]];
             if (!node || node.value === undefined) return "";
             if (i === parts.length - 1) {
-                return node.displayValue != null ? node.displayValue : (node.value ?? "");
+                if (node.displayValue != null) return node.displayValue;
+                return node.value != null ? node.value : "";
             }
-            current =
-                typeof node.value === "object" && node.value !== null
-                    ? node.value.fields || node.value
-                    : null;
+            if (typeof node.value === "object" && node.value !== null) {
+                current = node.value.fields || node.value;
+            } else {
+                return "";
+            }
         }
         return "";
     }
 
-    // ─── Wire: GraphQL search ──────────────────────────────────────────────────
+    _buildSelectedSubtitle(fields, profile) {
+        const subtitleFields =
+            profile?.subtitleFields || this._subtitleFieldsArray;
+        if (!subtitleFields.length) return undefined;
+        const parts = subtitleFields
+            .map((field) => {
+                const value = this._extractFieldValue(fields, field.apiName);
+                return value ? `${field.fieldLabel} : ${value}` : null;
+            })
+            .filter(Boolean);
+        return parts.length ? parts.join(" | ") : undefined;
+    }
 
-    @wire(graphql, { query: "$_graphqlQuery", variables: "$_graphqlVariables" })
-    _wiredSearchResults({ data, errors }) {
-        this._isLoading = false;
+    // ─── Wire: GraphQL search (one wire per searchField, up to 5) ───────────
+    // Each wire fires an independent query for its field. Results are merged
+    // progressively: spinner stops on first result, more results added as
+    // subsequent queries complete.
+
+    @wire(graphql, { query: "$_graphqlQuery0", variables: "$_graphqlVariables0" })
+    _wiredSearch0({ data, errors }) { this._handleFieldResult(0, data, errors); }
+
+    @wire(graphql, { query: "$_graphqlQuery1", variables: "$_graphqlVariables1" })
+    _wiredSearch1({ data, errors }) { this._handleFieldResult(1, data, errors); }
+
+    @wire(graphql, { query: "$_graphqlQuery2", variables: "$_graphqlVariables2" })
+    _wiredSearch2({ data, errors }) { this._handleFieldResult(2, data, errors); }
+
+    @wire(graphql, { query: "$_graphqlQuery3", variables: "$_graphqlVariables3" })
+    _wiredSearch3({ data, errors }) { this._handleFieldResult(3, data, errors); }
+
+    @wire(graphql, { query: "$_graphqlQuery4", variables: "$_graphqlVariables4" })
+    _wiredSearch4({ data, errors }) { this._handleFieldResult(4, data, errors); }
+
+    _handleFieldResult(fieldIndex, data, errors) {
+        // Ignore initialization calls (wire fires with undefined before first real response)
+        if (data == null && (errors == null || errors === undefined)) return;
+        // Ignore wires for out-of-bounds field indices (unused slots)
+        if (fieldIndex >= this._searchFieldsArray.length) return;
+
+        const now = performance.now();
+        const sinceSearch = this._perfSearchTermSetAt
+            ? (now - this._perfSearchTermSetAt).toFixed(2)
+            : "N/A";
+        const fieldName = this._searchFieldsArray[fieldIndex]?.apiName || `field${fieldIndex}`;
+        console.log(`###[PERF] Field[${fieldIndex}] (${fieldName}) response at ${now.toFixed(2)}ms (${sinceSearch}ms after search)`);
+
         if (data) {
             this._errorMessage = undefined;
             const edges = data.uiapi?.query?.[this.objectApiName]?.edges || [];
-            this._results = edges.map((edge) => {
-                const profile = this._resolveProfileForNode(edge.node);
-                return {
-                    id: edge.node.Id,
-                    title: this._readNodeField(
-                        edge.node,
-                        profile?.titleField || this.titleField,
-                    ),
-                    subtitle: this._buildSubtitle(
-                        profile?.subtitleFields || this._cfg.subtitleFields,
-                        (apiName) => this._readNodeField(edge.node, apiName),
-                    ),
-                };
-            });
+            const newResults = edges
+                .filter((edge) => !this._seenIds.has(edge.node.Id))
+                .map((edge) => {
+                    this._seenIds.add(edge.node.Id);
+                    const profile = this._resolveProfileForNode(edge.node);
+                    const effectiveTitleField = profile?.titleField || this.titleField;
+                    return {
+                        id: edge.node.Id,
+                        title: this._readNodeField(edge.node, effectiveTitleField),
+                        subtitle: this._buildFormattedSubtitle(edge.node, profile),
+                        node: edge.node,
+                    };
+                });
+            if (newResults.length > 0) {
+                this._results = [...this._results, ...newResults];
+                console.log(`###[PERF] Field[${fieldIndex}] (${fieldName}) added ${newResults.length} result(s) — total: ${this._results.length}`);
+            }
+            // Stop spinner as soon as the first results are available
+            if (this._isLoading && this._results.length > 0) {
+                console.log(`###[PERF] First results available at ${now.toFixed(2)}ms (${sinceSearch}ms) — stopping spinner`);
+                this._isLoading = false;
+            }
         }
+
         if (errors) {
-            console.error("customRecordPicker: GraphQL error", errors);
-            this._errorMessage =
-                errors.map((e) => e.message).join(". ") ||
-                "Erreur lors de la recherche";
-            this._results = [];
+            console.error(`customRecordPicker: GraphQL error for field[${fieldIndex}] (${fieldName})`, JSON.stringify(errors));
+            const messages = [];
+            for (const err of errors) {
+                if (err.errorType === "adapterError" && Array.isArray(err.error)) {
+                    for (const inner of err.error) {
+                        const msg = inner.message || "";
+                        const typeMatch = msg.match(/Variable '(\w+)' of type '(\w+)' used in position expecting type '(\w+)'/);
+                        const fieldMatch = msg.match(/field '(\w+)' can not be filtered in a query call/);
+                        if (typeMatch) {
+                            messages.push(`Configuration filtre: le type "${typeMatch[2]}" est incorrect pour la variable "${typeMatch[1]}", type attendu: "${typeMatch[3]}".`);
+                        } else if (fieldMatch) {
+                            messages.push(`Le champ "${fieldMatch[1]}" ne peut pas être utilisé comme filtre ou champ de recherche.`);
+                        } else if (msg) {
+                            messages.push(msg);
+                        }
+                    }
+                } else if (err.message) {
+                    messages.push(err.message);
+                }
+            }
+            if (messages.length) {
+                this._errorMessage = messages.join(" | ");
+            }
+        }
+
+        // Decrement pending count; stop spinner when all field queries have responded
+        this._pendingSearchCount = Math.max(0, this._pendingSearchCount - 1);
+        if (this._pendingSearchCount === 0) {
+            console.log(`###[PERF] All ${this._searchFieldsArray.length} field quer${this._searchFieldsArray.length === 1 ? "y" : "ies"} complete at ${now.toFixed(2)}ms (${sinceSearch}ms after search) — total results: ${this._results.length}`);
+            this._isLoading = false;
         }
     }
 
@@ -316,99 +872,77 @@ export default class CustomRecordPicker extends LightningElement {
         }
         if (current == null) return "";
         if (typeof current === "object") {
-            return current.displayValue != null
-                ? current.displayValue
-                : (current.value ?? "");
+            if (current.displayValue != null) return current.displayValue;
+            return current.value != null ? current.value : "";
         }
         return current;
     }
 
-    // ─── Subtitle builder (shared between search results and selected record) ──
-
-    _buildSubtitle(subtitleFields, readFn) {
-        if (!subtitleFields?.length) return undefined;
-        const parts = subtitleFields
-            .map((f) => {
-                const v = readFn(f.apiName);
-                return v ? `${f.fieldLabel} : ${v}` : null;
+    _buildFormattedSubtitle(node, profile) {
+        const fields = profile?.subtitleFields || this._subtitleFieldsArray;
+        if (!fields.length) return undefined;
+        const parts = fields
+            .map((field) => {
+                const value = this._readNodeField(node, field.apiName);
+                return value ? `${field.fieldLabel} : ${value}` : null;
             })
             .filter(Boolean);
         return parts.length ? parts.join(" | ") : undefined;
     }
 
-    // ─── Filter → GraphQL where clause (cached per search term) ───────────────
+    // ─── Per-field filter data ──────────────────────────────────────────────────
+    // Builds the where clause + variables for ONE search field (fieldIndex).
+    // The filter criteria from config are identical for every field query.
 
-    get _filterData() {
-        const term = this._searchTerm;
-        if (this._filterDataCache.term !== term) {
-            this._filterDataCache = { term, data: this._computeFilterData(term) };
-        }
-        return this._filterDataCache.data;
-    }
+    _filterDataForField(fieldIndex) {
+        const field = this._searchFieldsArray[fieldIndex];
+        if (!field) return null;
 
-    _computeFilterData(term) {
         const filterVariables = {};
         const variableDeclarations = [];
         const conditions = [];
 
-        // Search condition — OR across searchFields
-        if (term && term.length >= this._cfg.minimumSearchLength) {
-            const searchParts = this._cfg.searchFields.map((field, index) => {
-                const varName = `searchTerm${index}`;
-                const isPicklist = field.dataType === "Picklist";
-                variableDeclarations.push(`$${varName}: ${field.dataType || "String"}`);
-                filterVariables[varName] = isPicklist
-                    ? term
-                    : `%${sanitizeSearchTerm(term)}%`;
-                const { prefix, suffix } = fieldPathToWhereNesting(field.apiName);
-                return `{ ${prefix}: { ${isPicklist ? "eq" : "like"}: $${varName} }${suffix} }`;
-            });
-            conditions.push(
-                searchParts.length === 1
-                    ? searchParts[0]
-                    : `{ or: [${searchParts.join(", ")}] }`,
-            );
-        }
+        // Search condition — single field only
+        const varName = "searchTerm";
+        const type = field.dataType || "String";
+        const isExactMatch = type === "Picklist";
+        variableDeclarations.push(`$${varName}: ${type}`);
+        filterVariables[varName] = isExactMatch
+            ? this._searchTerm
+            : `%${sanitizeSearchTerm(this._searchTerm)}%`;
+        const { prefix, suffix } = fieldPathToWhereNesting(field.apiName);
+        const op = isExactMatch ? "eq" : "like";
+        conditions.push(`{ ${prefix}: { ${op}: $${varName} }${suffix} }`);
 
-        // Filter criteria
+        // Filter criteria (shared across all field queries)
         const filter = this._cfg.filter;
         if (filter?.criteria?.length) {
             const criteriaMap = new Map();
             filter.criteria.forEach((criterion, index) => {
-                validateFieldPath(
-                    criterion.fieldPath,
-                    `filter.criteria[${index}].fieldPath`,
-                );
+                validateFieldPath(criterion.fieldPath, `filter.criteria[${index}].fieldPath`);
                 validateOperator(criterion.operator);
-                const varName = `filterVal${index}`;
-                const { prefix, suffix } = fieldPathToWhereNesting(
-                    criterion.fieldPath,
-                );
-                if (isDateLiteral(criterion.value)) {
-                    criteriaMap.set(index + 1, {
-                        _raw: `{ ${prefix}: { ${criterion.operator}: { literal: ${criterion.value.literal} } }${suffix} }`,
-                    });
+
+                const filterVarName = `filterVal${index}`;
+                const { prefix: fPrefix, suffix: fSuffix } = fieldPathToWhereNesting(criterion.fieldPath);
+
+                if (isDateValue(criterion.value)) {
+                    const dateGql = serializeDateValue(criterion.value);
+                    criteriaMap.set(index + 1, { _raw: `{ ${fPrefix}: { ${criterion.operator}: ${dateGql} }${fSuffix} }` });
                 } else {
-                    criteriaMap.set(index + 1, {
-                        _raw: `{ ${prefix}: { ${criterion.operator}: $${varName} }${suffix} }`,
-                    });
-                    variableDeclarations.push(
-                        `$${varName}: ${inferGraphQLType(criterion.value)}`,
-                    );
-                    filterVariables[varName] = criterion.value;
+                    criteriaMap.set(index + 1, { _raw: `{ ${fPrefix}: { ${criterion.operator}: $${filterVarName} }${fSuffix} }` });
+                    const gqlType = criterion.dataType || inferGraphQLType(criterion.value);
+                    variableDeclarations.push(`$${filterVarName}: ${gqlType}`);
+                    filterVariables[filterVarName] = criterion.value;
                 }
             });
 
             let filterTree;
             if (filter.filterLogic) {
-                filterTree = flattenLogic(
-                    parseFilterLogic(filter.filterLogic, criteriaMap),
-                );
+                filterTree = flattenLogic(parseFilterLogic(filter.filterLogic, criteriaMap));
             } else {
-                filterTree =
-                    criteriaMap.size === 1
-                        ? criteriaMap.get(1)
-                        : { and: [...criteriaMap.values()] };
+                filterTree = criteriaMap.size === 1
+                    ? criteriaMap.get(1)
+                    : { and: [...criteriaMap.values()] };
             }
             conditions.push(serializeWhereClause(filterTree));
         }
@@ -423,35 +957,40 @@ export default class CustomRecordPicker extends LightningElement {
         return { whereClause, variableDeclarations, filterVariables };
     }
 
-    // ─── Dynamic GraphQL query ─────────────────────────────────────────────────
+    // ─── Per-field query/variable builders ───────────────────────────────────
 
-    get _graphqlQuery() {
+    _buildSearchQueryForField(fieldIndex) {
         if (this._configError) return undefined;
         if (!this.objectApiName || !this.titleField) return undefined;
-        if (
-            !this._searchTerm ||
-            this._searchTerm.length < this._cfg.minimumSearchLength
-        )
-            return undefined;
+        if (!this._searchTerm || this._searchTerm.length < this._cfg.minimumSearchLength) return undefined;
+        if (fieldIndex >= this._searchFieldsArray.length) return undefined;
 
-        const { whereClause, variableDeclarations } = this._filterData;
+        const filterData = this._filterDataForField(fieldIndex);
+        if (!filterData) return undefined;
+
+        const { whereClause, variableDeclarations } = filterData;
         const allFieldsGql = this._allQueryApiNames
             .map((f) => fieldToGraphQL(f))
             .join("\n                                    ");
-        const orderByLeaf = this.titleField.split(".").pop();
-        const varDecl =
-            variableDeclarations.length > 0
-                ? `(${variableDeclarations.join(", ")})`
-                : "";
+        const varDecl = variableDeclarations.length > 0
+            ? `(${variableDeclarations.join(", ")})`
+            : "";
+        const fieldName = this._searchFieldsArray[fieldIndex].apiName;
+
+        const now = performance.now();
+        const sinceSearch = this._perfSearchTermSetAt
+            ? (now - this._perfSearchTermSetAt).toFixed(2)
+            : "N/A";
+        console.log(`###[PERF] Building query for field[${fieldIndex}] (${fieldName}) at ${now.toFixed(2)}ms (${sinceSearch}ms after search)`);
 
         return gql`
-            query SearchRecords${varDecl} {
+            query SearchRecords_Field${fieldIndex}${varDecl} {
                 uiapi {
                     query {
                         ${this.objectApiName}(
+                            upperBound: 50
                             ${whereClause}
                             first: ${this._cfg.maxResults}
-                            orderBy: { ${orderByLeaf}: { order: ASC } }
                         ) {
                             edges {
                                 node {
@@ -466,19 +1005,30 @@ export default class CustomRecordPicker extends LightningElement {
         `;
     }
 
-    get _graphqlVariables() {
+    _buildSearchVariablesForField(fieldIndex) {
         if (this._configError) return undefined;
-        if (
-            !this._searchTerm ||
-            this._searchTerm.length < this._cfg.minimumSearchLength
-        )
-            return undefined;
-        return this._filterData.filterVariables;
+        if (!this._searchTerm || this._searchTerm.length < this._cfg.minimumSearchLength) return undefined;
+        if (fieldIndex >= this._searchFieldsArray.length) return undefined;
+        const filterData = this._filterDataForField(fieldIndex);
+        return filterData ? filterData.filterVariables : undefined;
     }
 
-    // ─── Template getters ──────────────────────────────────────────────────────
+    // ─── Per-field reactive getters (supports up to 5 concurrent searchFields) ─
 
-    @api get isSelected() {
+    get _graphqlQuery0() { return this._buildSearchQueryForField(0); }
+    get _graphqlVariables0() { return this._buildSearchVariablesForField(0); }
+    get _graphqlQuery1() { return this._buildSearchQueryForField(1); }
+    get _graphqlVariables1() { return this._buildSearchVariablesForField(1); }
+    get _graphqlQuery2() { return this._buildSearchQueryForField(2); }
+    get _graphqlVariables2() { return this._buildSearchVariablesForField(2); }
+    get _graphqlQuery3() { return this._buildSearchQueryForField(3); }
+    get _graphqlVariables3() { return this._buildSearchVariablesForField(3); }
+    get _graphqlQuery4() { return this._buildSearchQueryForField(4); }
+    get _graphqlVariables4() { return this._buildSearchVariablesForField(4); }
+
+    // ─── Template getters ────────────────────────────────────────────────────
+
+    get isSelected() {
         return !!this._value && !!this._selectedTitle;
     }
     get hasResults() {
@@ -497,7 +1047,8 @@ export default class CustomRecordPicker extends LightningElement {
     get showDropdown() {
         return (
             this._isDropdownOpen &&
-            !!this._searchTerm &&
+            this._searchTerm != null &&
+            this._searchTerm !== "" &&
             (this.hasResults || this._isLoading || this._showEmptyMessage)
         );
     }
@@ -506,17 +1057,13 @@ export default class CustomRecordPicker extends LightningElement {
         return (
             !this._isLoading &&
             !this.hasResults &&
-            !!this._searchTerm &&
+            this._searchTerm &&
             this._searchTerm.length >= this._cfg.minimumSearchLength
         );
     }
 
-    @api get hasError() {
-        return (
-            !!this._configError ||
-            !!this._validationError ||
-            !!this._errorMessage
-        );
+    get hasError() {
+        return !!this._configError || !!this._validationError || !!this._errorMessage;
     }
 
     get _displayError() {
@@ -531,23 +1078,26 @@ export default class CustomRecordPicker extends LightningElement {
         return this._results.map((item, index) => ({
             ...item,
             optionIndex: String(index),
-            optionClass: `slds-media slds-listbox__option slds-listbox__option_entity slds-listbox__option_has-meta${
-                index === this._highlightedIndex ? " slds-has-focus" : ""
-            }`,
+            optionClass: `slds-media slds-listbox__option slds-listbox__option_entity slds-listbox__option_has-meta${index === this._highlightedIndex ? " slds-has-focus" : ""}`,
             ariaSelected: index === this._highlightedIndex ? "true" : "false",
         }));
     }
 
-    // ─── Event handlers ───────────────────────────────────────────────────────
+    // ─── Event handlers ──────────────────────────────────────────────────────
 
     handleInput(event) {
         const term = event.detail.value;
         this._validationError = undefined;
         this._errorMessage = undefined;
-        clearTimeout(this._debounceTimer);
+        if (this._debounceTimer) {
+            clearTimeout(this._debounceTimer);
+        }
         this._debounceTimer = setTimeout(() => {
             this._searchTerm = term;
+            this._perfSearchTermSetAt = performance.now();
+            console.log(`###[PERF] _searchTerm set to "${term}" at ${this._perfSearchTermSetAt.toFixed(2)}ms`);
             this._highlightedIndex = -1;
+
             this._validateConfiguration();
             if (this._configError) {
                 this._isLoading = false;
@@ -555,6 +1105,7 @@ export default class CustomRecordPicker extends LightningElement {
                 this._results = [];
                 return;
             }
+
             if (term && term.length >= this._cfg.minimumSearchLength) {
                 this._isLoading = true;
                 this._isDropdownOpen = true;
@@ -567,8 +1118,8 @@ export default class CustomRecordPicker extends LightningElement {
     }
 
     handleFocus() {
+        if (this.isSelected) return;
         if (
-            !this.isSelected &&
             this._searchTerm &&
             this._searchTerm.length >= this._cfg.minimumSearchLength
         ) {
@@ -608,7 +1159,9 @@ export default class CustomRecordPicker extends LightningElement {
         const item = this._results.find(
             (r) => r.id === event.currentTarget.dataset.id,
         );
-        if (item) this._selectItem(item);
+        if (item) {
+            this._selectItem(item);
+        }
     }
 
     handleClear() {
@@ -617,63 +1170,77 @@ export default class CustomRecordPicker extends LightningElement {
         this._dispatchChange(null);
     }
 
-    // ─── Internal helpers ──────────────────────────────────────────────────────
+    // ─── Internal helpers ────────────────────────────────────────────────────
 
     _validateConfiguration() {
         if (this._configError) return;
-        try {
-            const c = this._config || {};
 
-            if (typeof c.objectApiName !== "string" || !c.objectApiName.trim()) {
+        try {
+            const rawConfig = this._config || {};
+            const hasDiscriminator =
+                typeof rawConfig.discriminator === "string" &&
+                rawConfig.discriminator.trim().length > 0;
+            const hasDisplayProfiles =
+                !!rawConfig.displayProfiles &&
+                typeof rawConfig.displayProfiles === "object" &&
+                Object.keys(rawConfig.displayProfiles).length > 0;
+
+            if (
+                typeof rawConfig.objectApiName !== "string" ||
+                !rawConfig.objectApiName.trim()
+            ) {
                 throw new Error(
                     "Configuration invalide: objectApiName est obligatoire.",
                 );
             }
-            if (!Array.isArray(c.searchFields) || c.searchFields.length === 0) {
+
+            if (
+                !Array.isArray(rawConfig.searchFields) ||
+                rawConfig.searchFields.length === 0
+            ) {
                 throw new Error(
                     "Configuration invalide: searchFields est obligatoire.",
                 );
             }
 
-            validateObjectName(c.objectApiName);
+            validateObjectName(rawConfig.objectApiName);
             validateFieldPath(this._cfg.titleField, "titleField");
 
-            this._cfg.subtitleFields.forEach((f, i) =>
-                validateFieldPath(f.apiName, `subtitleFields[${i}].apiName`),
+            this._subtitleApiNames.forEach((fieldPath, index) =>
+                validateFieldPath(fieldPath, `subtitleFields[${index}].apiName`),
             );
-            this._cfg.searchFields.forEach((f, i) => {
-                if (!f?.apiName) {
+
+            this._searchFieldsArray.forEach((field, index) => {
+                if (!field?.apiName) {
                     throw new Error(
-                        `Configuration invalide: searchFields[${i}].apiName est obligatoire.`,
+                        `Configuration invalide: searchFields[${index}].apiName est obligatoire.`,
                     );
                 }
-                validateFieldPath(f.apiName, `searchFields[${i}].apiName`);
+                validateFieldPath(
+                    field.apiName,
+                    `searchFields[${index}].apiName`,
+                );
             });
-
-            const hasDiscriminator =
-                typeof c.discriminator === "string" &&
-                c.discriminator.trim().length > 0;
-            const hasDisplayProfiles =
-                !!c.displayProfiles &&
-                typeof c.displayProfiles === "object" &&
-                Object.keys(c.displayProfiles).length > 0;
 
             if (hasDiscriminator && !hasDisplayProfiles) {
                 throw new Error(
                     "Configuration invalide: displayProfiles est obligatoire quand discriminator est défini.",
                 );
             }
+
             if (!hasDiscriminator && hasDisplayProfiles) {
                 throw new Error(
                     "Configuration invalide: discriminator est obligatoire quand displayProfiles est défini.",
                 );
             }
 
-            if (c.discriminator) {
-                validateFieldPath(c.discriminator, "discriminator");
+            if (rawConfig.discriminator) {
+                validateFieldPath(rawConfig.discriminator, "discriminator");
             }
-            if (c.displayProfiles) {
-                for (const [key, profile] of Object.entries(c.displayProfiles)) {
+            if (rawConfig.displayProfiles) {
+                for (const [key, profile] of Object.entries(
+                    rawConfig.displayProfiles,
+                )) {
                     if (profile.titleField) {
                         validateFieldPath(
                             profile.titleField,
@@ -681,14 +1248,14 @@ export default class CustomRecordPicker extends LightningElement {
                         );
                     }
                     if (Array.isArray(profile.subtitleFields)) {
-                        profile.subtitleFields.forEach((f, idx) => {
-                            if (!f?.apiName) {
+                        profile.subtitleFields.forEach((field, idx) => {
+                            if (!field?.apiName) {
                                 throw new Error(
                                     `Configuration invalide: displayProfiles.${key}.subtitleFields[${idx}].apiName est obligatoire.`,
                                 );
                             }
                             validateFieldPath(
-                                f.apiName,
+                                field.apiName,
                                 `displayProfiles.${key}.subtitleFields[${idx}].apiName`,
                             );
                         });
@@ -712,12 +1279,15 @@ export default class CustomRecordPicker extends LightningElement {
             this.template.host.style.removeProperty("width");
             return;
         }
-        const raw = String(this.width).trim();
-        if (WIDTH_PATTERN.test(raw)) {
-            this.template.host.style.width = raw;
+
+        const rawWidth = String(this.width).trim();
+        const allowedPattern =
+            /^(auto|fit-content|max-content|min-content|[0-9]+(?:\.[0-9]+)?(?:px|rem|em|%|vw|vh))$/i;
+        if (allowedPattern.test(rawWidth)) {
+            this.template.host.style.width = rawWidth;
         } else {
             this.template.host.style.removeProperty("width");
-        }
+        }        
     }
 
     _moveHighlight(direction) {
@@ -731,10 +1301,15 @@ export default class CustomRecordPicker extends LightningElement {
 
     _scrollHighlightedOptionIntoView() {
         if (this._highlightedIndex < 0) return;
+
         requestAnimationFrame(() => {
-            this.template
-                .querySelector(`[data-index="${this._highlightedIndex}"]`)
-                ?.scrollIntoView({ block: "nearest", inline: "nearest" });
+            const highlightedOption = this.template.querySelector(
+                `[data-index="${this._highlightedIndex}"]`,
+            );
+            highlightedOption?.scrollIntoView({
+                block: "nearest",
+                inline: "nearest",
+            });
         });
     }
 
@@ -742,6 +1317,7 @@ export default class CustomRecordPicker extends LightningElement {
         this._value = item.id;
         this._selectedTitle = item.title;
         this._selectedSubtitle = item.subtitle;
+        this._selectedRecord = this._buildOutputRecordFromNode(item.node);
         this._searchTerm = undefined;
         this._closeDropdown();
         this._validationError = undefined;
@@ -754,18 +1330,64 @@ export default class CustomRecordPicker extends LightningElement {
         this._highlightedIndex = -1;
     }
 
+    get _isOmniScriptContext() {
+        return this.useOmniscript || !!this.omniJsonData;
+    }
+
+    get _isFlowContext() {
+        return this.useFlow;
+    }
+
+    _buildOutputRecordFromNode(node) {
+        if (!node) return null;
+        const record = { Id: node.Id };
+        for (const fieldPath of this._allQueryApiNames) {
+            if (fieldPath === "Id") continue;
+            record[fieldPath] = this._readNodeField(node, fieldPath);
+        }
+        return record;
+    }
+
+    _buildOutputRecordFromFields(fields) {
+        if (!fields) return null;
+        const record = { Id: this._value };
+        for (const fieldPath of this._allQueryApiNames) {
+            if (fieldPath === "Id") continue;
+            record[fieldPath] = this._extractFieldValue(fields, fieldPath);
+        }
+        return record;
+    }
+
     _dispatchChange(recordId) {
+        const record = this._selectedRecord || null;
+        // Always dispatch custom event (works in any context: LWC, Flow, OmniScript)
         this.dispatchEvent(
             new CustomEvent("change", {
-                detail: { recordId },
+                detail: { recordId, record },
                 bubbles: false,
                 composed: false,
             }),
         );
-        if (this.useFlow) {
+
+        // Flow context: push value via FlowAttributeChangeEvent
+        if (this._isFlowContext) {
             this.dispatchEvent(
                 new FlowAttributeChangeEvent("selectedRecordId", recordId),
             );
+            this.dispatchEvent(
+                new FlowAttributeChangeEvent(
+                    "selectedRecord",
+                    record ? JSON.stringify(record) : null,
+                ),
+            );
+        }
+
+        // OmniScript context: push value via omniApplyCallResp
+        if (this._isOmniScriptContext) {
+            this.omniApplyCallResp({
+                [`${this.outputKey}Id`]: recordId,
+                [this.outputKey]: record,
+            });
         }
     }
 }
