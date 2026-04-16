@@ -1,310 +1,418 @@
-# Implémentation SOSL - Résumé et Prochaines Étapes
 
-## 📋 Fichiers Créés
+# Documentation du composant customRecordPicker
 
-### 1. **Classe Apex** - Implémentation du SOSL dynamique
-**Fichier:** `force-app/main/default/classes/CustomRecordPickerSearchController.cls`
+## Présentation
 
-✅ **Responsabilités:**
-- Accepte les requêtes de recherche du LWC
-- Valide tous les paramètres (object names, field paths, operators)
-- Construit une requête SOSL dynamique
-- Exécute `Database.search()`
-- Applique les critères de filtrage post-recherche
-- Retourne les résultats en JSON
+**customRecordPicker** est un composant Lightning Web Component (LWC) configurable qui reproduit et étend l’expérience du `lightning-record-picker` natif Salesforce. Il permet :
 
-✅ **Classes imbriquées:**
-- `SearchRequest` - Modèle de requête
-- `FilterCriterion` - Critère de filtrage individuel
-- `SearchResult` - Résultat avec tous les champs
-
-✅ **Opérateurs supportés:** `eq`, `ne`, `like`, `gt`, `gte`, `lt`, `lte`, `in`, `nin`
-
-### 2. **Tests Unitaires** - Couverture complète
-**Fichier:** `force-app/main/default/classes/CustomRecordPickerSearchControllerTest.cls`
-
-✅ **10+ tests:**
-- Recherche simple
-- Avec filtres (AND/OR logic)
-- Opérateurs spécifiques (LIKE, IN, NIN)
-- Logique de filtrage complexe
-- Validations et exceptions
-- Sanitization des termes
-- Cap des résultats
-
-### 3. **Documentation Architecture**
-**Fichier:** `docs/SOSL_ARCHITECTURE.md`
-
-📚 **Contient:**
-- Problème initial (GraphQL n'a pas SOSL)
-- Avantages SOSL vs SOQL
-- Architecture complète avec diagrammes
-- Sécurité et validations
-- Performance benchmarks
-- Points d'optimisation futurs
-
-### 4. **Guide de Migration**
-**Fichier:** `docs/LWC_MIGRATION_GUIDE.md`
-
-🔄 **Step-by-step:**
-- Changements d'imports (GraphQL → Apex)
-- Suppression de la logique GraphQL
-- Nouvelle fonction `_executeSearch()`  
-- Adaptation des helpers
-- Gestion d'erreurs Apex
-- Checklist de migration
-
-### 5. **Exemple de Code LWC**
-**Fichier:** `docs/EXAMPLE_LWC_WITH_APEX.js`
-
-💻 **Code complet modifié montrant:**
-- Import Apex method
-- Fonction `_executeSearch()` asynchrone
-- Appel `await search({ request })`
-- Transformation des résultats
-- Helpers pour traiter les résultats Apex
-- Gestion d'erreurs Apex
+- **Profils d’affichage dynamiques** : affiche des sous-titres différents selon la valeur d’un champ discriminant (ex : `IsPersonAccount`, `RecordType.DeveloperName`)
+- **Système de filtres avancés** : critères multiples, expressions logiques (`AND`, `OR`, `NOT`, parenthèses), prise en charge des littéraux de date Salesforce (`TODAY`, `LAST_MONTH`, ...)
+- **Recherche multi-champs** : recherche sur plusieurs champs (String, Picklist)
+- **Champs de relation** : traverse les relations (ex : `Owner.Name`, `RecordType.DeveloperName`)
+- **Compatibilité Flow** : déclenche `FlowAttributeChangeEvent` si `useFlow = true`
+- **Navigation clavier** : flèches, Entrée, Échap
+- **API de validation** : méthodes `validate()` et `reportValidity()` compatibles avec la validation Flow
 
 ---
 
-## 🎯 Pourquoi Cette Solution ?
+## Fichiers du composant
 
-### ❌ Problème Original
 ```
-GraphQL API (uiapi) dans Salesforce
-├─ uiapi.query → SOQL uniquement ❌ (pas de SOSL)
-└─ uiapi.search → N'existe pas réellement ❌
-```
-
-### ✅ Solution SOSL Apex
-```
-LWC → appelle @AuraEnabled method
-       ↓
-Apex exécute Database.search() (SOSL)
-       ↓
-SOSL cherche sur l'index Salesforce (5× plus rapide)
-       ↓
-Résultats retournés en JSON
-```
-
-### 🚀 Avantages
-| Aspect | GraphQL (ne marche pas) | SOSL Apex (fonctionne) |
-|--------|-------------------------|------------------------|
-| **API** | `uiapi.search` ∉ GraphQL | `Database.search()` ✅ |
-| **Recherche** | SOQL (LIKE basique) | SOSL full-text (⚡ index) |
-| **Multi-champs** | Complexe | Natif avec FIND |
-| **Performance** | ~100ms | ~20ms (index Salesforce) |
-| **Cross-object** | ❌ | ✅ Possible |
-
----
-
-## 🔧 Prochaines Étapes
-
-### Phase 1: Préparation
-```bash
-# 1. Créer une scratch org
-sfdx force:org:create -s -f config/project-scratch-def.json -a scratchorg
-
-# 2. Déployer les fichiers Apex
-sfdx force:source:deploy -p force-app/main/default/classes -u scratchorg
-
-# 3. Exécuter les tests
-sfdx force:apex:test:run -n CustomRecordPickerSearchControllerTest -u scratchorg
-```
-
-### Phase 2: Test du Composant LWC
-```bash
-# 4. Modifier le LWC existant en suivant EXAMPLE_LWC_WITH_APEX.js
-
-# 5. Tester dans la scratch org
-# - Ouvrir le composant dans une page de test
-# - Vérifier les appels Apex (console du navigateur)
-# - Tester les cas de filtrage complexes
-
-# 6. Comparer les performances
-# Avant (GraphQL échoue): ❌
-# Après (SOSL Apex): ✅ ~20ms pour 10k records
-```
-
-### Phase 3: Production
-```bash
-# 7. Ajouter des tests LWC si nécessaire
-# 8. Déployer vers l'org cible
-sfdx force:source:deploy -p force-app -u production
-
-# 9. Mettre à jour la documentation
+lwc/customRecordPicker/
+├── customRecordPicker.html
+├── customRecordPicker.js
+├── customRecordPicker.css
+├── customRecordPicker.js-meta.xml
+├── customRecordPickerUtils.js          ← fonctions utilitaires
+└── __tests__/
+    ├── customRecordPicker.test.js      ← tests d’intégration
+    └── customRecordPickerUtils.test.js ← tests unitaires
 ```
 
 ---
 
-## 🧪 Tester Rapidement (Scratch Org)
+## API publique (`@api`)
 
-### Test 1: Recherche simple
-```javascript
-// Dans la console du navigateur du composant LWC
-const request = {
-  searchTerm: "dupont",
-  objectApiName: "Account",
-  searchFields: ["Name"],
-  maxResults: 10,
-  criteria: [],
-  filterLogic: ""
-};
-// Le LWC enverra cette requête à l'Apex
-```
+| Propriété            | Type                | Défaut     | Description |
+|----------------------|---------------------|------------|-------------|
+| `config`             | Object \| String    | —          | Objet de configuration (ou chaîne JSON). **Obligatoire.** |
+| `selectedRecordId`   | String              | —          | ID de l’enregistrement sélectionné (lecture/écriture). |
+| `disabled`           | Boolean             | false      | Désactive le composant. |
+| `width`              | String              | "640px"   | Largeur du composant (px, rem, em, %, vw, vh, auto). |
+| `useFlow`            | Boolean             | false      | Si true, déclenche `FlowAttributeChangeEvent` lors d’un changement. |
+| `isSelected`         | Boolean (readonly)  | false      | true si un enregistrement est sélectionné et chargé. |
+| `hasError`           | Boolean (readonly)  | false      | true si une erreur de config, validation ou requête est active. |
 
-### Test 2: Avec filtres complexes
-```javascript
-const request = {
-  searchTerm: "tech",
-  objectApiName: "Account",
-  searchFields: ["Name", "Industry"],
-  maxResults: 10,
-  criteria: [
-    { fieldPath: "Type", operator: "eq", value: "Customer", dataType: "Picklist" },
-    { fieldPath: "Industry", operator: "eq", value: "Technology", dataType: "Picklist" }
+### Méthodes
+
+| Méthode              | Retourne                                   | Description |
+|----------------------|--------------------------------------------|-------------|
+| `validate()`         | `{ isValid: Boolean, errorMessage?: String }` | Vérifie la validité du champ et de la config. |
+| `reportValidity()`   | Boolean                                    | Raccourci pour `validate().isValid`. |
+| `clearSelection()`   | void                                       | Réinitialise la sélection et l’état interne. |
+
+### Événements
+
+| Événement | `detail`                        | Déclenché quand |
+|-----------|----------------------------------|-----------------|
+| `change`  | `{ recordId: String \| null }`   | Un enregistrement est sélectionné ou la sélection est effacée. |
+
+---
+
+## Propriété `config` — référence complète
+
+La propriété `config` accepte un objet JavaScript ou une chaîne JSON.
+
+```jsonc
+{
+  // ── Obligatoire ───────────────────────────────────────────────
+  "objectApiName": "Account",           // API Name Salesforce de l’objet à rechercher
+  "searchFields": [                     // Champs utilisés pour la recherche
+    { "apiName": "Name" },              // Champ texte (par défaut, opérateur LIKE)
+    { "apiName": "AccountSource", "dataType": "Picklist" } // Picklist (opérateur eq)
   ],
-  filterLogic: "1 AND 2"  // Type='Customer' AND Industry='Technology'
-};
+
+  // ── Affichage ────────────────────────────────────────────────
+  "label": "Recherche Compte",           // Libellé affiché (défaut : "Rechercher un enregistrement")
+  "placeholder": "Saisir pour rechercher…",    // Placeholder
+  "titleField": "Name",                // Champ principal affiché (défaut : "Name")
+  "subtitleFields": [                   // Champs secondaires (sous-titre)
+    { "apiName": "BillingCity", "fieldLabel": "Ville" }
+  ],
+  "iconName": "standard:account",      // Icône SLDS
+
+  // ── Comportement ─────────────────────────────────────────────
+  "required": false,                    // Champ obligatoire pour la validation
+  "maxResults": 10,                     // Nombre max de résultats (max 100)
+  "minimumSearchLength": 2,            // Nb min de caractères avant recherche
+
+  // ── Filtres ─────────────────────────────────────────────────
+  "filter": {
+    "criteria": [ /* voir référence filtre ci-dessous */ ],
+    "filterLogic": "1 AND 2"            // Optionnel. Par défaut : AND de tous les critères.
+  },
+
+  // ── Profils d’affichage dynamiques ──────────────────────────
+  "discriminator": "IsPersonAccount",  // Champ discriminant
+  "displayProfiles": {                  // Clé = valeur du champ discriminant
+    "true":  { "subtitleFields": [ … ] },
+    "false": { "subtitleFields": [ … ] }
+  }
+}
 ```
 
-### Test 3: Vérifier la sanitization
-```javascript
-// Tester avec caractères SOSL spéciaux
-const request = {
-  searchTerm: "test&sanitize!*?", // Caractères spéciaux
-  objectApiName: "Account",
-  searchFields: ["Name"],
-  maxResults: 10
-};
-// Apex échappe automatiquement : test\&sanitize\!\*\?
+### Détail des attributs de config
+
+#### `objectApiName`
+**Type** : String — **Obligatoire**
+Nom API Salesforce de l’objet à rechercher. Exemples : `Account`, `Contact`, `Opportunity`, `CustomObject__c`.
+
+#### `searchFields`
+**Type** : Array<{ apiName: String, dataType?: String }> — **Obligatoire**
+Liste des champs utilisés pour la recherche (OR logique entre eux). Chaque entrée :
+- `apiName` (obligatoire) : nom du champ (ex : `Name`, `Phone`, `RecordType.DeveloperName`)
+- `dataType` (optionnel) : "String" (LIKE) ou "Picklist" (eq)
+
+Exemple :
+```json
+"searchFields": [
+  { "apiName": "Name" },
+  { "apiName": "Phone" },
+  { "apiName": "AccountSource", "dataType": "Picklist" }
+]
+```
+
+#### `label`
+Libellé affiché au-dessus du champ (défaut : "Rechercher un enregistrement").
+
+#### `placeholder`
+Texte d’aide affiché dans le champ (défaut : vide).
+
+#### `titleField`
+Champ principal affiché dans chaque résultat et dans la pilule sélectionnée (défaut : `Name`).
+
+#### `subtitleFields`
+Champs secondaires affichés sous le titre (tableau d’objets `{ apiName, fieldLabel }`).
+Peut être surchargé par `displayProfiles`.
+
+Exemple :
+```json
+"subtitleFields": [
+  { "apiName": "BillingCity",   "fieldLabel": "Ville"   },
+  { "apiName": "AccountNumber", "fieldLabel": "Réf"    },
+  { "apiName": "Owner.Name",    "fieldLabel": "Propriétaire"  }
+]
+```
+
+#### `iconName`
+Nom de l’icône SLDS (ex : `standard:account`).
+
+#### `required`
+Champ obligatoire pour la validation (`validate()`).
+
+#### `maxResults`
+Nombre maximum de résultats affichés (max 100).
+
+#### `minimumSearchLength`
+Nombre minimal de caractères avant déclenchement de la recherche (défaut : 2).
+
+#### `filter`
+Filtre statique appliqué à chaque recherche (en plus du terme saisi).
+
+##### `filter.criteria`
+Tableau de critères :
+```json
+{
+  "fieldPath": "Type",         // Champ cible (relation possible)
+  "operator": "eq",            // eq, ne, like, gt, gte, lt, lte, in, nin
+  "value": "Customer - Direct" // Valeur (voir ci-dessous)
+}
+```
+Valeurs supportées : String, ID Salesforce, Integer, Float, Boolean, littéral de date (`{ "literal": "TODAY" }`), null, tableau (pour in/nin).
+
+##### `filter.filterLogic`
+Expression logique combinant les critères (ex : `1 AND (2 OR 3)`).
+
+##### Littéraux de date supportés
+Tous les littéraux Salesforce GraphQL : `TODAY`, `YESTERDAY`, `TOMORROW`, `LAST_WEEK`, `THIS_WEEK`, `NEXT_WEEK`, `LAST_MONTH`, `THIS_MONTH`, `NEXT_MONTH`, `LAST_90_DAYS`, `NEXT_90_DAYS`, `THIS_YEAR`, `LAST_YEAR`, `NEXT_YEAR`, `LAST_N_DAYS:n`, `NEXT_N_DAYS:n`, etc.
+
+#### `discriminator`
+Champ discriminant pour appliquer dynamiquement un profil d’affichage (`displayProfiles`).
+Exemples : `IsPersonAccount`, `RecordType.DeveloperName`, `Type`.
+
+> **Important** : la comparaison se fait toujours sur la valeur string du champ. Pour les booléens, utiliser "true"/"false" comme clés.
+
+#### `displayProfiles`
+Objet `{ valeurDiscriminant: { subtitleFields: [...] } }`.
+Permet de personnaliser dynamiquement les sous-titres selon la valeur du champ discriminant.
+
+Exemple :
+```json
+"discriminator": "IsPersonAccount",
+"displayProfiles": {
+  "true": {
+    "subtitleFields": [
+      { "apiName": "LastName",        "fieldLabel": "Nom" },
+      { "apiName": "PersonNumber__c", "fieldLabel": "N° de personne" }
+    ]
+  },
+  "false": {
+    "subtitleFields": [
+      { "apiName": "AccountNumber",   "fieldLabel": "N° de compte" },
+      { "apiName": "SIRETnumber__c",  "fieldLabel": "SIRET" }
+    ]
+  }
+}
 ```
 
 ---
 
-## 📊 Checklist d'Implémentation
+## Scénarios d’usage (exemples)
 
-### ✅ Phase Apex (Complétée)
-- [x] Créer `CustomRecordPickerSearchController.cls` (SOSL dynamique)
-- [x] Créer `CustomRecordPickerSearchControllerTest.cls` (Tests complets)
-- [x] Valider tous les paramètres
-- [x] Documenter la sécurité
-
-### ⏳ Phase LWC (À faire)
-- [ ] Importer Apex method
-- [ ] Créer fonction `_executeSearch()`
-- [ ] Remplacer `@wire(graphql)` par appel asynchrone
-- [ ] Adapter les helpers de traitement des résultats
-- [ ] Tester avec cas complexes
-- [ ] Mettre à jour la documentation du projet
-
-### ⏳ Phase Production (À faire)
-- [ ] Deploy vers Sandbox
-- [ ] Tests UAT
-- [ ] Formation du team
-- [ ] Deploy vers Production
-
----
-
-## 🔐 Sécurité - Points Importants
-
-✅ **Déjà implémentés dans l'Apex:**
-- [x] Validation stricte des field paths (regex)
-- [x] Whitelist des opérateurs
-- [x] Sanitization SOSL des termes
-- [x] Clause `with sharing` pour RLS
-- [x] Pas de construction dynamique de requête (safe)
-
-⚠️ **À vérifier lors de la migration LWC:**
-- [ ] Le LWC passe uniquement les paramètres attendus
-- [ ] Pas d'injection possible via la configuration
-- [ ] Les logs n'exposent pas de données sensibles
-
----
-
-## 📈 Métriques de Performance Attendues
-
-**Avant (GraphQL - ne marche pas):**
-- Status: ❌ Erreur `uiapi.search` not found
-
-**Après (SOSL Apex):**
-- Latence réseau: ~50ms
-- Query Apex: ~20-30ms (index SOSL)
-- Rendu des résultats: ~10-20ms
-- **Total: ~80-100ms** pour 10k+ records
-
-_vs._
-
-**SOQL (alternative moins bonne):**
-- Query complète: ~100-200ms (pas d'index)
-- **Total: ~150-250ms** pour 10k+ records
-
----
-
-## 🚨 Troubleshooting
-
-### Si l'Apex method n'est pas trouvée:
+### 1 — Recherche minimale sur Contact
+```json
+{
+  "label": "Contact",
+  "objectApiName": "Contact",
+  "titleField": "Name",
+  "searchFields": [{ "apiName": "Name" }]
+}
 ```
-Error: Cannot find apex method CustomRecordPickerSearchController.search
+
+### 2 — Recherche multi-champs avec sous-titre
+```json
+{
+  "label": "Compte",
+  "objectApiName": "Account",
+  "titleField": "Name",
+  "searchFields": [
+    { "apiName": "Name" },
+    { "apiName": "Phone" }
+  ],
+  "subtitleFields": [
+    { "apiName": "BillingCity", "fieldLabel": "Ville" },
+    { "apiName": "AccountNumber", "fieldLabel": "Réf" }
+  ],
+  "iconName": "standard:account",
+  "placeholder": "Recherche par nom ou téléphone…",
+  "maxResults": 20
+}
 ```
-→ Vérifier que la classe est déployée: `sfdx force:org:list --all`
 
-### Si les résultats sont vides:
+### 3 — Filtre sur valeur statique
+```json
+{
+  "label": "Client",
+  "objectApiName": "Account",
+  "titleField": "Name",
+  "searchFields": [{ "apiName": "Name" }],
+  "filter": {
+    "criteria": [
+      {
+        "fieldPath": "Type",
+        "operator": "eq",
+        "value": "Customer - Direct"
+      }
+    ]
+  }
+}
 ```
-results = [] même avec searchTerm valide
+
+### 4 — Filtre sur littéral de date
+```json
+{
+  "label": "Compte",
+  "objectApiName": "Account",
+  "titleField": "Name",
+  "searchFields": [{ "apiName": "Name" }],
+  "filter": {
+    "criteria": [
+      {
+        "fieldPath": "LastModifiedDate",
+        "operator": "lt",
+        "value": { "literal": "TODAY" }
+      }
+    ]
+  }
+}
 ```
-→ Vérifier que l'objet/les champs existent dans l'index Salesforce
-→ Vérifier que `with sharing` n'exclut pas les enregistrements
 
-### Si la recherche est lente:
-→ Vérifier que l'index SOSL est activé: Setup → Data Cloud / Search Settings
-→ Optimaliser les critères de filtrage (moins de conditions = plus rapide)
+### 5 — Filtres multiples avec filterLogic
+```json
+{
+  "label": "Compte récent",
+  "objectApiName": "Account",
+  "titleField": "Name",
+  "searchFields": [{ "apiName": "Name" }],
+  "filter": {
+    "criteria": [
+      {
+        "fieldPath": "CreatedDate",
+        "operator": "gte",
+        "value": { "literal": "LAST_90_DAYS" }
+      },
+      {
+        "fieldPath": "Type",
+        "operator": "eq",
+        "value": "Customer - Direct"
+      },
+      {
+        "fieldPath": "Type",
+        "operator": "eq",
+        "value": "Partner"
+      }
+    ],
+    "filterLogic": "1 AND (2 OR 3)"
+  }
+}
+```
+
+### 6 — Profils d’affichage dynamiques (discriminator)
+```json
+{
+  "label": "Tiers payeurs",
+  "objectApiName": "Account",
+  "titleField": "Name",
+  "searchFields": [
+    { "apiName": "Name" },
+    { "apiName": "AccountSource", "dataType": "Picklist" }
+  ],
+  "iconName": "standard:account",
+  "discriminator": "IsPersonAccount",
+  "displayProfiles": {
+    "true": {
+      "subtitleFields": [
+        { "apiName": "LastName",        "fieldLabel": "Nom" },
+        { "apiName": "PersonNumber__c", "fieldLabel": "N° de personne" }
+      ]
+    },
+    "false": {
+      "subtitleFields": [
+        { "apiName": "AccountNumber",   "fieldLabel": "N° de compte" },
+        { "apiName": "SIRETnumber__c",  "fieldLabel": "SIRET" }
+      ]
+    }
+  },
+  "placeholder": "Rechercher tiers payeur",
+  "required": true,
+  "maxResults": 50,
+  "minimumSearchLength": 2
+}
+```
+
+### 7 — Champs de relation
+```json
+{
+  "label": "Opportunité",
+  "objectApiName": "Opportunity",
+  "titleField": "Name",
+  "searchFields": [{ "apiName": "Name" }],
+  "subtitleFields": [
+    { "apiName": "Owner.Name",         "fieldLabel": "Propriétaire" },
+    { "apiName": "Owner.Profile.Name", "fieldLabel": "Profil" },
+    { "apiName": "StageName",          "fieldLabel": "Étape" }
+  ],
+  "iconName": "standard:opportunity"
+}
+```
+
+### 8 — Filtrer par ID de parent
+```json
+{
+  "label": "Contact",
+  "objectApiName": "Contact",
+  "titleField": "Name",
+  "searchFields": [{ "apiName": "Name" }],
+  "subtitleFields": [
+    { "apiName": "Title", "fieldLabel": "Titre" }
+  ],
+  "filter": {
+    "criteria": [
+      {
+        "fieldPath": "AccountId",
+        "operator": "eq",
+        "value": "001xx000003GHPYAA4"
+      }
+    ]
+  }
+}
+```
+
+### 9 — Utilisation dans un écran Flow
+Définir `useFlow = true`. Le composant déclenche `FlowAttributeChangeEvent` lors d’un changement de sélection, ce qui permet au Flow de récupérer la variable `selectedRecordId`.
+
+| Propriété            | Valeur |
+|----------------------|--------|
+| `config`             | Chaîne JSON de la config |
+| `useFlow`            | `true` |
+| `selectedRecordId`   | variable de sortie (ex : `{!varSelectedId}`) |
 
 ---
 
-## 📞 Questions Courantes
+## Utilisation dans OmniScript
 
-**Q: Peut-on toujours utiliser GraphQL?**
-A: Oui, mais pas pour SOSL. GraphQL ne supporte que SOQL (WHERE clauses).
+- Définir `useOmniscript = true`
+- Le JSON de config doit être encapsulé dans des quotes simples (`'...'`)
 
-**Q: Et la recherche cross-object?**
-A: Possible avec SOSL Apex. À ajouter futuitement si besoin.
-
-**Q: Comment maintenir la rétrocompatibilité?**
-A: La classe Apex accepte les mêmes paramètres que GraphQL. Le LWC peut coexister avec les deux.
-
-**Q: Quels objets fonctionnent avec SOSL?**
-A: Tous les objets indexés. Vérifier dans Setup → Data Cloud / Search settings.
-
----
-
-## 📚 Ressources
-
-- [SOSL Documentation](https://developer.salesforce.com/docs/atlas.en-us.soql_sosl.meta/soql_sosl/sforce_api_calls_sosl.htm)
-- [Database.search() Apex API](https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/apex_methods_system_database.htm#apex_System_Database_search_examples)
-- [Security with `with sharing`](https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/apex_classes_keywords_sharing.htm)
+Exemple :
+```json
+'{
+  "label": "Recherche Compte",
+  "objectApiName": "Account",
+  "titleField": "Name",
+  "searchFields": [ { "apiName": "Name" } ],
+  "iconName": "standard:account"
+}'
+```
 
 ---
 
-## 💡 Prochains Pas (Post-Migration)
+## Publication sur Confluence
 
-1. **Optimisations:**
-   - [ ] Ajouter cache des résultats récents
-   - [ ] Implémenter batch search pour gros volumes
-   - [ ] Fine-tune les critères SOSL
-
-2. **Améliorations:**
-   - [ ] Support cross-object SOSL
-   - [ ] Typage des résultats (picklist values, etc.)
-   - [ ] Analytics sur les recherches populaires
-
-3. **Documentation:**
-   - [ ] Ajouter exemples de configuration avancée
-   - [ ] Créer tutorial vidéo
-   - [ ] Documenter l'extensibilité
+- Copier ce contenu dans une page Confluence (format markdown ou wiki).
+- Ajouter des exemples d’utilisation réels selon vos besoins métier.
+- Pour toute question, contacter l’équipe Salesforce.
 
 ---
 
-**Status:** ✅ Classes Apex prêtes | ⏳ Migration LWC en attente
-
-**Questions?** Consultez les fichiers de doc ou exécutez les tests Apex.
+**Fin de la documentation**
